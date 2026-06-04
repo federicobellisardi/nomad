@@ -1,0 +1,50 @@
+name: nomad
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python
+  - python=3.11
+
+  # Build tools
+  - cmake>=3.20
+  - make
+  - ninja
+  - pkg-config
+
+  # C++ libraries (headers + shared libs via conda-forge)
+  - pybind11>=2.11
+  - tbb-devel          # oneTBB headers + libs
+  - tbb                # oneTBB runtime
+  - arrow-cpp          # Apache Arrow C++ (includes Parquet)
+  - bzip2              # for libosmium bz2 PBF support
+  - xz                 # for libosmium LZMA PBF support
+  - lz4-c              # for libosmium LZ4 PBF support
+  - expat              # for libosmium XML OSM support
+  - zlib
+
+  # Python scientific stack
+  - numpy
+  - pandas
+  - geopandas
+  - pyarrow
+  - shapely
+  - fiona
+
+  # Python visualization
+  - folium
+  - matplotlib
+  - contextily
+
+  # Python dev
+  - jupyter
+  - jupyterlab
+  - ipykernel
+  - ipywidgets
+
+  # Install via pip (not on conda-forge or need latest)
+  - pip
+  - pip:
+    - pydeck
+    - keplergl
+    - osmium             # pyosmium Python bindings (optional, for quick network inspection)
