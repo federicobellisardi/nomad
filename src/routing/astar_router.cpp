@@ -56,7 +56,7 @@ void AStarRouter::ThreadData::lazy_reset() {
 }
 
 // ── A* query ──────────────────────────────────────────────────────────────────
-Route AStarRouter::astar_query(NodeId origin, NodeId dest, AgentMode /*mode*/) const {
+Route AStarRouter::astar_query(NodeId origin, NodeId dest, AgentMode mode) const {
     const uint32_t N = graph_.num_nodes();
     if (origin >= N || dest >= N) return {};
     if (origin == dest) { Route r; r.is_valid = true; return r; }
@@ -100,6 +100,9 @@ Route AStarRouter::astar_query(NodeId origin, NodeId dest, AgentMode /*mode*/) c
             NodeId v = ed.target;
             if (v >= N) continue;
             if (td.visited[v]) continue;
+            // Mode filter: skip edges not accessible to this agent's mode
+            if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), mode))
+                continue;
 
             float cost = (traffic_ && cfg_.use_traffic_costs)
                 ? traffic_->current_travel_time(eid)

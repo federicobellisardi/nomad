@@ -19,7 +19,9 @@ QueueTrafficModel::QueueTrafficModel(const Graph& graph) : graph_(graph) {
     for (uint32_t e = 0; e < E; ++e) {
         const EdgeData& ed = graph.edges[e];
         float estimated_lanes = std::max(1.0f, ed.capacity / 1600.0f);
-        queues_[e].storage_cap    = ed.length_m * estimated_lanes * kJamDensity;
+        // Minimum storage = 1 vehicle: prevents micro-segments (< 7.5m) from
+        // showing false BPR congestion when a single agent enters them.
+        queues_[e].storage_cap    = std::max(1.0f, ed.length_m * estimated_lanes * kJamDensity);
         queues_[e].flow_cap_per_s = ed.capacity / 3600.0f;
         queues_[e].last_exit_time = 0.0f;
         states_[e].travel_time_s.store(graph.free_flow_time(e));

@@ -54,7 +54,14 @@ void GeoJsonWriter::on_snapshot(SimTime t, const AgentHotStore&,
 
         float ff = g.free_flow_time(e);
         float tt = traffic.current_travel_time(e);
-        float cong = (ff > 0) ? std::min((tt / ff) - 1.0f, 1.0f) : 0.0f;
+        // Congestion ∈ [0, 1]: normalise BPR delay by its maximum (0.15 at vc=1).
+        // congestion = 0  → free-flow;  congestion = 1 → fully congested (BPR peak).
+        // Use min(...,1) to handle future traffic models with higher ceilings.
+        constexpr float kBprMaxDelay = 0.15f;
+        float cong = (ff > 0 && kBprMaxDelay > 0)
+            ? std::min((tt / ff - 1.0f) / kBprMaxDelay, 1.0f)
+            : 0.0f;
+        if (cong < 0.0f) cong = 0.0f;
 
         if (!first) f << ',';
         first = false;
