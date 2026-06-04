@@ -1,0 +1,54 @@
+{
+  "_comment": "Test scenario for Liechtenstein (~38k nodes). Downloads in ~2 MB.",
+  "name": "liechtenstein_test",
+  "version": "0.1",
+
+  "simulation": {
+    "start_time_s": 25200,
+    "end_time_s": 28800,
+    "sync_window_s": 1.0,
+    "reroute_thresh": 0.30,
+    "num_threads": 0,
+    "store_traces": false,
+    "traffic_model": "queue",
+    "router": "astar",
+    "snapshot_interval_s": 600
+  },
+
+  "network": {
+    "osm_pbf": "data/test_osm/liechtenstein.osm.pbf",
+    "simplify_topology": true,
+    "extract_transit": false
+  },
+
+  "routing": {
+    "algorithm": "astar",
+    "preprocess_ch": false,
+    "reroute_threshold": 0.30,
+    "cache_entries": 100000,
+    "use_traffic_costs": false
+  },
+
+  "traffic": {
+    "model": "queue"
+  },
+
+  "demand": {
+    "source": "gravity",
+    "synthetic": {
+      "total_agents": 5000,
+      "beta": 0.001,
+      "peak_mean_s": 27000.0,
+      "peak_std_s": 1800.0,
+      "mode": "car",
+      "seed": 42
+    }
+  },
+
+  "output": {
+    "output_dir": "results/liechtenstein_test",
+    "writers": ["geojson"],
+    "snapshot_interval_s": 600,
+    "store_trajectories": false
+  }
+}

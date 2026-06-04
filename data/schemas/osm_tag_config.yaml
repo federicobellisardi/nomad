@@ -1,0 +1,69 @@
+# nomad OSM tag configuration
+# Controls how OSM way/node tags are interpreted during graph construction.
+# This file is auditable and publishable as a supplementary material annex.
+
+# Signal timing defaults (used when OSM lacks explicit timing data)
+signal_cycle_s:   90.0   # seconds per signal cycle
+signal_green_frac: 0.45  # green phase fraction (HCM default for urban arterials)
+
+# Snap radius for matching GTFS stops to road graph nodes [meters]
+gtfs_snap_radius_m: 50.0
+
+# Highway class defaults
+# Format: highway_tag: [speed_kmh, lanes, capacity_per_lane_veh_h]
+highway_defaults:
+  motorway:       [120, 2, 2000]
+  motorway_link:  [80,  1, 1500]
+  trunk:          [100, 2, 1800]
+  trunk_link:     [60,  1, 1400]
+  primary:        [80,  2, 1600]
+  primary_link:   [50,  1, 1200]
+  secondary:      [60,  1, 1000]
+  secondary_link: [40,  1,  900]
+  tertiary:       [50,  1,  800]
+  tertiary_link:  [30,  1,  700]
+  residential:    [30,  1,  600]
+  living_street:  [10,  1,  200]
+  service:        [20,  1,  300]
+  unclassified:   [30,  1,  500]
+  track:          [20,  1,  200]
+  cycleway:       [15,  1,  300]
+  footway:        [5,   1,  600]
+  path:           [5,   1,  400]
+  steps:          [2,   1,  200]
+
+# Car access: access= tag values that allow car travel
+car_access:
+  - yes
+  - permissive
+  - designated
+  - private
+  - destination
+  - delivery
+  - customers
+
+# Bicycle access
+bike_access:
+  - yes
+  - permissive
+  - designated
+  - private
+
+# Pedestrian access
+pedestrian_access:
+  - yes
+  - permissive
+  - designated
+
+# Tags that unconditionally exclude a way from the car network
+car_exclude:
+  - "no"
+  - emergency
+  - military
+  - forestry
+
+# Capacity derate factors (dimensionless multipliers applied to base capacity)
+capacity_derate:
+  signal_saturation: 0.90   # lost time factor, from HCM Chapter 19
+  stop_sign_minor:   0.60   # minor-road derate at stop-controlled intersections
+  roundabout:        0.75   # entry flow constraint at roundabouts

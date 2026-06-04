@@ -1,0 +1,78 @@
+{
+  "name": "bologna_morning",
+  "version": "0.1",
+
+  "simulation": {
+    "start_time_s": 25200,
+    "end_time_s":   32400,
+    "sync_window_s": 1.0,
+    "reroute_thresh": 0.25,
+    "num_threads": 1,
+    "store_traces": false,
+    "traffic_model": "queue",
+    "router": "astar",
+    "snapshot_interval_s": 900
+  },
+
+  "network": {
+    "osm_pbf": "data/test_osm/bologna.osm.pbf",
+    "simplify_topology": true,
+    "extract_transit": false
+  },
+
+  "routing": {
+    "algorithm": "astar",
+    "preprocess_ch": false,
+    "cache_entries": 200000,
+    "use_traffic_costs": false
+  },
+
+  "traffic": {
+    "model": "queue"
+  },
+
+  "demand": {
+    "source": "gravity",
+
+    "modes": ["car"],
+
+    "modes_split": {
+      "car":     0.60,
+      "walk":    0.15,
+      "bike":    0.10,
+      "transit": 0.15
+    },
+
+    "synthetic": {
+      "total_agents": 50000,
+      "beta": 0.0005,
+      "peak_mean_s": 28800.0,
+      "peak_std_s": 3600.0,
+      "seed": 42
+    }
+  },
+
+  "mode_choice": {
+    "model": "MNL",
+    "multimodal": false,
+    "walk_speed_ms": 1.39,
+    "bike_speed_ms": 4.17,
+    "max_walk_access_m": 800.0,
+    "vot_eur_per_hour": 12.0,
+    "mnl": {
+      "asc_car":     0.0,
+      "asc_bike":   -0.5,
+      "asc_walk":   -0.8,
+      "asc_transit":-0.3,
+      "beta_time":  -0.015,
+      "beta_cost":  -0.20
+    }
+  },
+
+  "output": {
+    "output_dir": "results/bologna_morning",
+    "writers": ["geojson"],
+    "snapshot_interval_s": 900,
+    "store_trajectories": false
+  }
+}

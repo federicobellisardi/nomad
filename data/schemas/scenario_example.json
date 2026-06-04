@@ -1,0 +1,79 @@
+{
+  "_comment": "Example nomad scenario configuration. All fields have defaults; only override what you need.",
+  "name": "bologna_morning",
+  "version": "0.1",
+
+  "simulation": {
+    "start_time_s": 25200,
+    "end_time_s":   32400,
+    "sync_window_s": 1.0,
+    "reroute_thresh": 0.25,
+    "num_threads": 0,
+    "store_traces": false,
+    "traffic_model": "queue",
+    "router": "CH",
+    "snapshot_interval_s": 300
+  },
+
+  "network": {
+    "osm_pbf": "data/bologna.osm.pbf",
+    "osm_tag_config": "data/schemas/osm_tag_config.yaml",
+    "simplify_topology": true,
+    "extract_transit": true,
+    "gtfs_dir": "data/gtfs_bologna"
+  },
+
+  "routing": {
+    "algorithm": "CH",
+    "preprocess_ch": true,
+    "ch_cache": "data/bologna_ch.bin",
+    "reroute_threshold": 0.25,
+    "cache_entries": 500000,
+    "use_traffic_costs": true
+  },
+
+  "traffic": {
+    "model": "queue",
+    "ltm_time_step_s": 5.0
+  },
+
+  "demand": {
+    "source": "gravity",
+    "synthetic": {
+      "total_agents": 50000,
+      "beta": 0.003,
+      "peak_mean_s": 28800.0,
+      "peak_std_s": 3600.0,
+      "mode": "car",
+      "seed": 42
+    }
+  },
+
+  "mode_choice": {
+    "model": "MNL",
+    "multimodal": true,
+    "walk_speed_ms": 1.39,
+    "bike_speed_ms": 4.17,
+    "max_walk_access_m": 800.0,
+    "vot_eur_per_hour": 12.0,
+    "mnl": {
+      "asc_car":     0.0,
+      "asc_bike":   -0.5,
+      "asc_walk":   -0.8,
+      "asc_transit":-0.3,
+      "beta_time":  -0.015,
+      "beta_cost":  -0.20,
+      "beta_wait":  -0.025,
+      "beta_walk":  -0.030,
+      "beta_transfer": -300.0
+    }
+  },
+
+  "output": {
+    "output_dir": "results/bologna_morning",
+    "writers": ["geojson"],
+    "snapshot_interval_s": 300,
+    "store_trajectories": false,
+    "store_link_stats": true
+  }
+}
