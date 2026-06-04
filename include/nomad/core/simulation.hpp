@@ -114,6 +114,7 @@ private:
 
     std::atomic<SimTime>     current_time_{0.0};
     std::atomic<std::size_t> events_processed_{0};
+    std::atomic<uint64_t>    n_depart_{0}, n_enter_{0}, n_exit_{0}, n_arrive_{0};
 
     std::unordered_map<uint8_t, std::vector<std::function<void(const Event&)>>> hooks_;
 

@@ -46,7 +46,10 @@ private:
         std::vector<EdgeId>   prev_edge;
         std::vector<uint8_t>  visited;
         std::vector<std::pair<float, NodeId>> heap;
+        std::vector<NodeId>   touched;  // nodes modified this query — O(touched) reset
+
         void reset(uint32_t num_nodes);
+        void lazy_reset();  // reset only touched nodes, O(touched) not O(N)
     };
 
     const Graph&             graph_;

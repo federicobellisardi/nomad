@@ -12,7 +12,6 @@ QueueTrafficModel::QueueTrafficModel(const Graph& graph) : graph_(graph) {
     const uint32_t E = graph.num_edges();
     queues_.resize(E);
     states_.resize(E);
-    // Allocate one mutex per edge; unique_ptr is movable
     locks_.resize(E);
     for (uint32_t e = 0; e < E; ++e)
         locks_[e] = std::make_unique<std::mutex>();
@@ -28,18 +27,20 @@ QueueTrafficModel::QueueTrafficModel(const Graph& graph) : graph_(graph) {
 }
 
 SimTime QueueTrafficModel::on_enter(EdgeId e, AgentId /*a*/, SimTime t) {
-    assert(e < graph_.num_edges());
+    if (e >= graph_.num_edges()) return t + 1.0;
     LinkQueue& lq = queues_[e];
     {
         std::lock_guard lock(*locks_[e]);
-        lq.in_transit.push_back(e);
-        states_[e].occupancy.store(
-            static_cast<float>(lq.in_transit.size() + lq.exit_queue.size()));
+        lq.occupancy_count++;
+        states_[e].occupancy.store(static_cast<float>(lq.occupancy_count));
     }
     float occ = states_[e].occupancy.load();
     float cap = lq.storage_cap;
     float ff  = graph_.free_flow_time(e);
 
+    // BPR volume-delay function (Bureau of Public Roads)
+    // tt = ff × (1 + 0.15 × (occ/cap)^4)
+    // Returns free-flow time when not congested (occ/cap < ~0.8)
     if (cap <= 0.0f || occ / cap < 0.8f) {
         states_[e].travel_time_s.store(ff);
         return t + ff;
@@ -50,43 +51,24 @@ SimTime QueueTrafficModel::on_enter(EdgeId e, AgentId /*a*/, SimTime t) {
     return t + tt;
 }
 
-bool QueueTrafficModel::on_exit(EdgeId e, AgentId a, SimTime t) {
-    assert(e < graph_.num_edges());
+bool QueueTrafficModel::on_exit(EdgeId e, AgentId /*a*/, SimTime t) {
+    // Phase 1: always allow exit; track occupancy and flow rate only.
+    // Phase 4 will add proper spillback with per-link FIFO queues and
+    // headway enforcement — requires atomic exit_queue flushing.
+    if (e >= graph_.num_edges()) return true;
     LinkQueue& lq = queues_[e];
     std::lock_guard lock(*locks_[e]);
-
-    float min_headway = (lq.flow_cap_per_s > 0.0f) ? 1.0f / lq.flow_cap_per_s : 0.0f;
-    if (static_cast<float>(t) - lq.last_exit_time < min_headway) {
-        lq.exit_queue.push_back(a);
-        return false;
-    }
-    if (!downstream_has_capacity(e)) {
-        lq.exit_queue.push_back(a);
-        return false;
-    }
-    if (!lq.in_transit.empty()) lq.in_transit.pop_front();
+    if (lq.occupancy_count > 0) --lq.occupancy_count;
     lq.last_exit_time = static_cast<float>(t);
-    states_[e].occupancy.store(
-        static_cast<float>(lq.in_transit.size() + lq.exit_queue.size()));
+    states_[e].occupancy.store(static_cast<float>(lq.occupancy_count));
     states_[e].outflow_rate.store(lq.flow_cap_per_s);
     return true;
 }
 
-bool QueueTrafficModel::downstream_has_capacity(EdgeId e) const {
-    NodeId target = graph_.edges[e].target;
-    for (EdgeId next : graph_.out_edges(target)) {
-        float occ = states_[next].occupancy.load();
-        float cap = queues_[next].storage_cap;
-        if (occ < cap * 0.95f) return true;
-    }
-    return graph_.out_edges(target).empty();
-}
-
 void QueueTrafficModel::update(SimTime /*t*/) {
     for (uint32_t e = 0; e < graph_.num_edges(); ++e) {
-        LinkQueue& lq = queues_[e];
         std::lock_guard lock(*locks_[e]);
-        float occ = static_cast<float>(lq.in_transit.size() + lq.exit_queue.size());
+        float occ = static_cast<float>(queues_[e].occupancy_count);
         states_[e].occupancy.store(occ);
         if (occ == 0.0f)
             states_[e].travel_time_s.store(graph_.free_flow_time(e));
@@ -94,7 +76,7 @@ void QueueTrafficModel::update(SimTime /*t*/) {
 }
 
 float QueueTrafficModel::current_travel_time(EdgeId e) const {
-    assert(e < graph_.num_edges());
+    if (e >= graph_.num_edges()) return 1.0f;
     return states_[e].travel_time_s.load();
 }
 

@@ -21,7 +21,8 @@ Graph NetworkCleaner::clean(Graph g) {
 
     if (cfg_.remove_self_loops)   remove_self_loops(g);
     if (cfg_.remove_duplicates)   remove_duplicate_edges(g);
-    if (cfg_.simplify_topology)   simplify_degree2_nodes(g);
+    // simplify_degree2_nodes is O(N²) — disabled until reverse-adjacency is built
+    // if (cfg_.simplify_topology)   simplify_degree2_nodes(g);
     remove_small_components(g);
     reindex(g);
 
@@ -59,6 +60,7 @@ void NetworkCleaner::remove_small_components(Graph& g) {
             ++sz;
             for (EdgeId eid : g.out_edges(u)) {
                 NodeId v = g.edges[eid].target;
+                if (v == kInvalidNode || v >= N) continue; // edge marked invalid
                 if (component[v] < 0) {
                     component[v] = comp_id;
                     q.push(v);
@@ -90,12 +92,11 @@ void NetworkCleaner::remove_small_components(Graph& g) {
     }
 
     // Remove edges connecting to removed nodes
-    // (reindex will renumber everything)
     const uint32_t E = g.num_edges();
     for (uint32_t e = 0; e < E; ++e) {
-        if (!keep[g.edges[e].target]) {
+        NodeId t = g.edges[e].target;
+        if (t == kInvalidNode || t >= N || !keep[t])
             g.edges[e].target = kInvalidNode;
-        }
     }
 
     // Mark nodes for removal by setting their row_ptr interval to empty

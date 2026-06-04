@@ -1,0 +1,126 @@
+nomad — How to test
+====================
+
+1. UNIT + INTEGRATION TESTS (no external data needed)
+------------------------------------------------------
+These tests run entirely in memory using synthetic graphs.
+
+  cd /mnt/c/Users/belli/OneDrive/Desktop/code/nomad
+
+  # Configure (uses system cmake 3.28, NOT conda cmake 4.x)
+  /usr/bin/cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+    -DNOMAD_BUILD_PYTHON=OFF -DNOMAD_BUILD_TESTS=ON \
+    -DCMAKE_PREFIX_PATH="$HOME/miniconda3/envs/nomad" -Wno-dev
+
+  # Build
+  cmake --build build -j$(nproc)
+
+  # Run all 42 tests
+  ctest --test-dir build -j$(nproc)
+
+  # Run only a specific group
+  ctest --test-dir build -R "integration" --output-on-failure
+  ctest --test-dir build -R "Graph" --output-on-failure
+  ctest --test-dir build -R "Simulation" --output-on-failure
+
+
+2. CLI — QUICK RUN (requires an OSM PBF file)
+---------------------------------------------
+Download a small test extract first:
+
+  bash tests/integration/download_test_data.sh
+  # Downloads Liechtenstein (~2 MB) to data/test_osm/
+
+Then run:
+
+  # Quick run: loads OSM, generates 10k gravity-model agents, writes GeoJSON
+  ./build/nomad_cli --osm data/test_osm/liechtenstein.osm.pbf
+
+  # Run from a JSON config (recommended for reproducibility)
+  ./build/nomad_cli --config data/schemas/scenario_liechtenstein.json
+
+  # Output is written to:  results/liechtenstein_test/
+
+
+3. CLI — VENICE (minimocas heritage test)
+-----------------------------------------
+Venice is the original minimocas use case. Download the north-east Italy extract
+and crop to Venice's bounding box using osmium:
+
+  # Install osmium if needed
+  conda install -c conda-forge osmium-tool
+
+  # Download (large: ~1.4 GB)
+  curl -L -o /tmp/nord-est.osm.pbf \
+    https://download.geofabrik.de/europe/italy/nord-est-latest.osm.pbf
+
+  # Crop to Venice lagoon (lon 12.2–12.5, lat 45.3–45.6)
+  osmium extract -b 12.2,45.3,12.5,45.6 /tmp/nord-est.osm.pbf \
+    -o data/test_osm/venice.osm.pbf
+
+  ./build/nomad_cli --osm data/test_osm/venice.osm.pbf
+
+
+4. PYTHON API (requires building with NOMAD_BUILD_PYTHON=ON)
+------------------------------------------------------------
+  conda activate nomad
+
+  /usr/bin/cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    -DNOMAD_BUILD_PYTHON=ON -DNOMAD_BUILD_TESTS=ON \
+    -DCMAKE_PREFIX_PATH="$HOME/miniconda3/envs/nomad" -Wno-dev
+
+  cmake --build build -j$(nproc)
+
+  # The Python module is installed to python/nomad/_nomad_core.so
+  python notebooks/01_test_synthetic.py
+
+  # Interactive use (Jupyter):
+  cd /mnt/c/Users/belli/OneDrive/Desktop/code/nomad
+  conda activate nomad
+  jupyter notebook notebooks/
+
+  # Example usage in Python:
+  from nomad import Scenario
+
+  sc = Scenario("data/test_osm/liechtenstein.osm.pbf",
+                config={"traffic_model": "queue", "router": "astar"})
+  sc.add_gravity_demand(total_agents=5000, peak_hour_s=28800)
+  sc.write_geojson("results/test_run/")
+  sc.run()
+
+  print(sc.time)              # current simulation time
+  print(sc.active_agents)     # agents still moving
+  flows = sc.link_flows()     # pandas DataFrame
+  print(flows.sort_values("travel_time_s", ascending=False).head(10))
+
+
+5. CHECK GEOJSON OUTPUT
+-----------------------
+After a run, open the GeoJSON snapshots in QGIS or kepler.gl:
+
+  ls results/liechtenstein_test/
+
+  # Each file is a snapshot at a specific simulation time:
+  #   network_state_025200.geojson  (t=25200s = 7:00 AM)
+  #   network_state_025800.geojson  (t=25800s = 7:10 AM)
+  #   ...
+
+  # Load in Python:
+  import geopandas as gpd
+  gdf = gpd.read_file("results/liechtenstein_test/network_state_025800.geojson")
+  gdf.plot(column="congestion", cmap="RdYlGn_r", legend=True)
+
+  # Open in kepler.gl (requires pydeck):
+  from nomad.viz import congestion_map
+  congestion_map("results/liechtenstein_test/network_state_025800.geojson",
+                 output_html="results/congestion.html")
+
+
+6. BENCHMARK
+------------
+  cmake --build build --target nomad_tests -j$(nproc)
+
+  # Run just the 1M event queue test and time it:
+  ctest --test-dir build -R "1M events" --output-on-failure -V
+
+  # Expected: < 0.3s for 1M events (EventQueue benchmark)

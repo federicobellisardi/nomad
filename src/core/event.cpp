@@ -15,6 +15,11 @@ void EventQueue::push(Event e) {
         overflow_.push(e);
     } else {
         calendar_[b].push_back(e);
+        // If this event falls in a bucket already drained (b < current_bucket_),
+        // reset current_bucket_ so drain_until re-scans it.
+        // This handles events pushed with the same timestamp as the currently
+        // processing window (e.g. AgentEnterLink pushed by AgentDepart at same t).
+        if (b < current_bucket_) current_bucket_ = b;
     }
     ++size_;
 }
