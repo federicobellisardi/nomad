@@ -1,0 +1,57 @@
+# ── Build ─────────────────────────────────────────────────────────────────────
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+
+# ── Test data (large OSM files — download with nomad-dl.py) ──────────────────
+data/test_osm/
+data/test_data/
+
+# ── Simulation results ────────────────────────────────────────────────────────
+results/
+nomad_output/
+
+# ── CH cache (regenerate with --preprocess-ch) ────────────────────────────────
+*.ch.bin
+data/*.bin
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+python/nomad/_nomad_core*.so
+python/nomad/_nomad_core*.pyd
+
+# ── Conda / virtualenv ────────────────────────────────────────────────────────
+.conda/
+.venv/
+env/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.user
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+spdlog_*.txt
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+*.tmp
+*.osm
+tmp/
