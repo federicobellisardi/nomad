@@ -48,7 +48,6 @@ struct RoutingConfig {
 
 struct TrafficConfig {
     std::string model = "queue";     // "queue" | "ltm"
-    float ltm_time_step_s = 5.0f;   // only for LTM
 };
 
 struct DemandConfig {

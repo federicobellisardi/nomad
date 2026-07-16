@@ -213,7 +213,9 @@ void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
     };
 
     // Is node u eligible for contraction?
-    // Criterion A: exactly 2 undirected neighbours and Simple type.
+    // Criterion A: exactly 2 undirected neighbours and Simple type, with a
+    //              clean one-to-one redirect mapping between in- and
+    //              out-edges (see is_valid_pass_through below).
     // Criterion B: Simple type and at least one incident edge < min_edge_length_m
     //              and exactly 2 undirected neighbours (regardless of directed degree).
     auto contractable = [&](NodeId u,
@@ -225,15 +227,21 @@ void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
         undir_nb(u, ins, outs, nb);
         if (nb.size() != 2) return false;
 
-        // Check if this is a strict degree-2 node: each of the 2 undirected
-        // neighbours provides exactly 1 in-edge and 1 out-edge.
-        bool is_strict_degree2 = true;
-        for (NodeId X : nb) {
-            uint32_t n_in = 0, n_out = 0;
-            for (EdgeId e : ins)  if (edge_src[e] == X) ++n_in;
-            for (EdgeId e : outs) if (g.edges[e].target == X) ++n_out;
-            if (n_in != 1 || n_out != 1) { is_strict_degree2 = false; break; }
-        }
+        // A valid pass-through redirects every in-edge from neighbour X to an
+        // out-edge toward the *other* neighbour Y. This must hold for BOTH
+        // one-way chains (A→u→B: 1 in-edge from A, 1 out-edge to B — the
+        // common case for motorways/trunk roads, which OSM usually maps as
+        // separate one-way carriageways with no reverse edge at all) and
+        // two-way chains (each neighbour contributes both an in- and an
+        // out-edge). Checking "n_in==1 && n_out==1 per neighbour" as the sole
+        // criterion — as a naive reading of "degree-2" suggests — silently
+        // rejects every one-way pass-through, since a one-way neighbour only
+        // ever supplies an in-edge *or* an out-edge, never both.
+        NodeId A = nb[0];
+        uint32_t in_from_A = 0, in_from_B = 0, out_to_A = 0, out_to_B = 0;
+        for (EdgeId e : ins)  (edge_src[e] == A ? in_from_A : in_from_B)++;
+        for (EdgeId e : outs) (g.edges[e].target == A ? out_to_A : out_to_B)++;
+        bool is_strict_degree2 = (in_from_A == out_to_B) && (in_from_B == out_to_A);
 
         if (is_strict_degree2) {
             // Criterion A: pass-through node on a straight road segment — always contract.

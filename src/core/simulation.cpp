@@ -263,24 +263,28 @@ void Simulation::handle_exit_link(const Event& e) {
         return;
     }
 
+    // Peek the next edge (without committing route_pos) so the traffic model
+    // can check downstream spillback before releasing the agent.
+    uint16_t pos  = hot_.route_pos[a] + 1;
+    auto     route = routes_.get_route(a);
+    EdgeId   next  = (pos < route.size()) ? route[pos] : kInvalidEdge;
+
     bool can_exit = true;
-    if (traffic_) can_exit = traffic_->on_exit(eid, a, e.time);
+    if (traffic_) can_exit = traffic_->on_exit(eid, next, a, e.time);
 
     if (!can_exit) {
         eq_.push({e.time + 1.0, a, eid, EventType::AgentExitLink, {}});
         return;
     }
 
-    uint16_t pos = ++hot_.route_pos[a];
-    auto route = routes_.get_route(a);
+    hot_.route_pos[a] = pos;
 
-    if (pos >= route.size()) {
+    if (next == kInvalidEdge) {
         hot_.state[a] = AgentState::AtActivity;
         eq_.push({e.time, a, eid, EventType::AgentArriveActivity, {}});
         return;
     }
 
-    EdgeId next = route[pos];
     eq_.push({e.time, a, next, EventType::AgentEnterLink, {}});
 }
 
@@ -369,6 +373,12 @@ void Simulation::teleport_stuck_agents(SimTime now) {
         EdgeId eid = hot_.current_edge[a];
         if (eid < graph_->num_edges() && traffic_)
             traffic_->force_remove(eid, a);
+
+        uint32_t rc = std::min<uint32_t>(hot_.reroute_count[a], teleported_by_reroute_count_.size() - 1);
+        ++teleported_by_reroute_count_[rc];
+        if (eid < graph_->num_edges())
+            ++teleported_by_class_[graph_->edges[eid].road_class];
+
         hot_.state[a] = AgentState::Arrived;
         ++batch;
     }
@@ -397,14 +407,16 @@ void Simulation::schedule_reroutes() {
     const auto states = traffic_->link_states();
     const uint32_t E = graph_->num_edges();
 
-    // 1. Identify congested edges (tt > (1+thresh) × ff).
+    // 1. Identify congested edges via the smoothed congestion_ema (tt/ff
+    //    averaged over several sync windows), not the instantaneous
+    //    occupancy/travel_time_s. Short, fast-clearing edges (e.g. motorway
+    //    junction connectors) can be genuinely congested most of the time yet
+    //    show occ==0 at the exact instant of this periodic scan — the EMA
+    //    catches that pattern where a single snapshot would miss it.
     std::vector<EdgeId> congested_vec;
     for (uint32_t eid = 0; eid < E; ++eid) {
-        float occ = states[eid].occupancy.load(std::memory_order_relaxed);
-        if (occ == 0.0f) continue;
-        float tt = states[eid].travel_time_s.load(std::memory_order_relaxed);
-        float ff = graph_->free_flow_time(eid);
-        if (ff > 0.0f && tt / ff > 1.0f + cfg_.reroute_thresh)
+        float ema = states[eid].congestion_ema.load(std::memory_order_relaxed);
+        if (ema > 1.0f + cfg_.reroute_thresh)
             congested_vec.push_back(eid);
     }
     std::unordered_set<EdgeId> congested_set(congested_vec.begin(), congested_vec.end());
@@ -429,9 +441,18 @@ void Simulation::schedule_reroutes() {
         if (cfg_.max_reroutes > 0 && hot_.reroute_count[a] >= cfg_.max_reroutes) continue;
         auto route    = routes_.get_route(a);
         uint16_t pos  = hot_.route_pos[a];
-        constexpr int kLookAhead = 5;
-        for (uint32_t k = 1; k <= kLookAhead && pos + k < route.size(); ++k) {
-            if (congested_set.count(route[pos + k])) {
+        // Scan the whole remaining route, not just a handful of edges ahead:
+        // a fixed short lookahead only catches congestion right in front of
+        // the agent, so anyone whose bottleneck is further down their route
+        // (or who never happens to be within a few edges of it exactly when
+        // a scan fires) never gets a chance to reroute at all. Capped at 200
+        // as a safety bound for pathological routes — real routes post
+        // network-simplification are far shorter.
+        constexpr uint32_t kMaxScan = 200;
+        uint32_t scan_end = static_cast<uint32_t>(
+            std::min<std::size_t>(route.size(), pos + 1 + kMaxScan));
+        for (uint32_t k = pos + 1; k < scan_end; ++k) {
+            if (congested_set.count(route[k])) {
                 to_reroute.push_back(a);
                 break;
             }
@@ -569,6 +590,12 @@ void Simulation::run_until(SimTime until) {
 
     // ── Stuck-agent diagnostics ────────────────────────────────────────────────
     // Aggregate over all OnLink agents to understand WHY they haven't arrived.
+    const char* class_names[] = {
+        "Motorway","MotorwayLink","Trunk","TrunkLink",
+        "Primary","PrimaryLink","Secondary","SecondaryLink",
+        "Tertiary","TertiaryLink","Residential","LivingStreet",
+        "Service","Unclassified","Track","Cycleway","Footway","Path","Steps"
+    };
     if (graph_ && n_onlink > 0) {
         // Per road_class: count stuck agents
         std::array<uint32_t, 256> stuck_by_class{};
@@ -579,6 +606,8 @@ void Simulation::run_until(SimTime until) {
         // Top stuck edges (edge_id → count)
         std::unordered_map<EdgeId, uint32_t> edge_counts;
         edge_counts.reserve(4096);
+        // reroute_count distribution among currently-stuck agents
+        std::array<uint64_t, 32> stuck_by_reroute_count{};
 
         const uint32_t N = static_cast<uint32_t>(hot_.size());
         for (AgentId a = 0; a < N; ++a) {
@@ -590,6 +619,7 @@ void Simulation::run_until(SimTime until) {
             uint8_t rc = graph_->edges[eid].road_class;
             stuck_by_class[rc]++;
             edge_counts[eid]++;
+            stuck_by_reroute_count[std::min<uint32_t>(hot_.reroute_count[a], stuck_by_reroute_count.size() - 1)]++;
 
             // Route completion ratio
             auto route = routes_.get_route(a);
@@ -615,12 +645,6 @@ void Simulation::run_until(SimTime until) {
         }
 
         spdlog::info("── Stuck agents ({}) by current road_class ──", n_onlink);
-        const char* class_names[] = {
-            "Motorway","MotorwayLink","Trunk","TrunkLink",
-            "Primary","PrimaryLink","Secondary","SecondaryLink",
-            "Tertiary","TertiaryLink","Residential","LivingStreet",
-            "Service","Unclassified","Track","Cycleway","Footway","Path","Steps"
-        };
         for (int rc = 0; rc < 19; ++rc) {
             if (stuck_by_class[rc] > 0)
                 spdlog::info("  {:>15s} ({}): {:6d} agents  ({:.1f}%)",
@@ -657,6 +681,29 @@ void Simulation::run_until(SimTime until) {
             spdlog::info("  edge {:6d}  class={:2d} ({})  ff={:.0f}s  stuck={}",
                 eid, rc, rc < 19 ? class_names[rc] : "?", ff, cnt);
         }
+
+        spdlog::info("── Stuck agents by reroute_count ──");
+        for (std::size_t i = 0; i < stuck_by_reroute_count.size(); ++i)
+            if (stuck_by_reroute_count[i] > 0)
+                spdlog::info("  reroute_count={}: {} agents", i, stuck_by_reroute_count[i]);
+    }
+
+    // ── Teleported-agent diagnostics ──────────────────────────────────────────
+    // Captured at teleport time (before state is overwritten) across the whole
+    // run — shows whether teleported agents exhausted their reroute budget
+    // (reroute_count == cfg_.max_reroutes) or were teleported despite having
+    // routing headroom left, and which road classes they were last on.
+    if (n_teleported_.load() > 0) {
+        spdlog::info("── Teleported agents ({}) by reroute_count ──", n_teleported_.load());
+        for (std::size_t i = 0; i < teleported_by_reroute_count_.size(); ++i)
+            if (teleported_by_reroute_count_[i] > 0)
+                spdlog::info("  reroute_count={}: {} agents", i, teleported_by_reroute_count_[i]);
+
+        spdlog::info("── Teleported agents by road_class (at teleport time) ──");
+        for (int rc = 0; rc < 19; ++rc)
+            if (teleported_by_class_[rc] > 0)
+                spdlog::info("  {:>15s} ({}): {:6d} agents",
+                    class_names[rc], rc, teleported_by_class_[rc]);
     }
 
     // ── Network capacity breakdown ────────────────────────────────────────────

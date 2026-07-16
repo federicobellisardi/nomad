@@ -6,8 +6,6 @@
 
 namespace nomad {
 
-static constexpr float kJamDensity = 1.0f / 7.5f;
-
 QueueTrafficModel::QueueTrafficModel(const Graph& graph) : graph_(graph) {
     const uint32_t E = graph.num_edges();
     queues_.resize(E);
@@ -61,7 +59,7 @@ SimTime QueueTrafficModel::on_enter(EdgeId e, AgentId /*a*/, SimTime t) {
     return t + tt;
 }
 
-bool QueueTrafficModel::on_exit(EdgeId e, AgentId /*a*/, SimTime t) {
+bool QueueTrafficModel::on_exit(EdgeId e, EdgeId /*next*/, AgentId /*a*/, SimTime t) {
     if (e >= graph_.num_edges()) return true;
     LinkQueue& lq = queues_[e];
 
@@ -113,23 +111,31 @@ void QueueTrafficModel::update(SimTime /*t*/) {
         EdgeId e   = active_list_[i];
         float  occ = static_cast<float>(queues_[e].occupancy_count);
         states_[e].occupancy.store(occ, std::memory_order_relaxed);
+        float ff = graph_.free_flow_time(e);
+        float tt;
         if (occ <= 0.0f) {
-            states_[e].travel_time_s.store(
-                graph_.free_flow_time(e), std::memory_order_relaxed);
+            tt = ff;
             is_active_[e] = 0;
         } else {
             // Recompute BPR travel time from current occupancy
             float cap = queues_[e].storage_cap;
-            float ff  = graph_.free_flow_time(e);
-            float tt;
             if (cap <= 0.0f || occ / cap < 0.8f) {
                 tt = ff;
             } else {
                 float vc = std::min(occ / cap, 2.0f);
                 tt = ff * (1.0f + 0.15f * std::pow(vc, 4.0f));
             }
-            states_[e].travel_time_s.store(tt, std::memory_order_relaxed);
             active_list_[out++] = e;
+        }
+        states_[e].travel_time_s.store(tt, std::memory_order_relaxed);
+
+        // Smooth tt/ff into the EMA so brief congestion spikes on
+        // fast-clearing edges still register over several sync windows.
+        if (ff > 0.0f) {
+            float ratio = tt / ff;
+            float ema   = states_[e].congestion_ema.load(std::memory_order_relaxed);
+            states_[e].congestion_ema.store(
+                ema + kCongestionEmaAlpha * (ratio - ema), std::memory_order_relaxed);
         }
     }
     active_list_.resize(out);

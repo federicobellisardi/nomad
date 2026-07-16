@@ -129,6 +129,37 @@ PYBIND11_MODULE(_nomad_core, m) {
                 &g->edges[0].road_class, owner
             );
         }, py::keep_alive<0,1>())
+        // Capacity [veh/h]
+        .def("edge_capacity", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<float>(
+                {static_cast<py::ssize_t>(g->num_edges())},
+                {static_cast<py::ssize_t>(sizeof(EdgeData))},
+                &g->edges[0].capacity, owner
+            );
+        }, py::keep_alive<0,1>())
+        // Index into way_names/way_ids for each edge
+        .def("edge_way_meta_idx", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<uint16_t>(
+                {static_cast<py::ssize_t>(g->num_edges())},
+                {static_cast<py::ssize_t>(sizeof(EdgeData))},
+                &g->edges[0].way_meta_idx, owner
+            );
+        }, py::keep_alive<0,1>())
+        // Intersection type (uint8, IntersectionType enum), per node
+        .def("node_intersection_type", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<uint8_t>(
+                {static_cast<py::ssize_t>(g->num_nodes())},
+                {static_cast<py::ssize_t>(sizeof(NodeData))},
+                &g->nodes[0].intersection_type, owner
+            );
+        }, py::keep_alive<0,1>())
+        // OSM way name for a given way_meta_idx (from edge_way_meta_idx())
+        .def("way_name", [](const std::shared_ptr<Graph>& g, uint16_t idx) {
+            return idx < g->way_names.size() ? g->way_names[idx] : std::string{};
+        }, py::arg("way_meta_idx"))
         .def("validate", &Graph::validate)
         .def("save", [](const std::shared_ptr<Graph>& g, const std::string& path) {
             g->save(path);

@@ -114,7 +114,6 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
     if (j.contains("traffic")) {
         const auto& t = j["traffic"];
         cfg.traffic.model          = t.value("model",          cfg.traffic.model);
-        cfg.traffic.ltm_time_step_s= t.value("ltm_time_step_s",cfg.traffic.ltm_time_step_s);
     }
 
     // ── demand ──────────────────────────────────────────────────────────────

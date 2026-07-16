@@ -17,7 +17,7 @@ public:
     explicit QueueTrafficModel(const Graph& graph);
 
     SimTime on_enter    (EdgeId e, AgentId a, SimTime t) override;
-    bool    on_exit     (EdgeId e, AgentId a, SimTime t) override;
+    bool    on_exit     (EdgeId e, EdgeId next, AgentId a, SimTime t) override;
     void    force_remove(EdgeId e, AgentId a)            override;
     void    update      (SimTime t)                      override;
     float   current_travel_time(EdgeId e) const          override;

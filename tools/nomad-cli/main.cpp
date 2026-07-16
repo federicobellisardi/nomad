@@ -94,9 +94,7 @@ static int run_scenario(ScenarioConfig cfg) {
 
     // ── Traffic model ─────────────────────────────────────────────────────────
     if (cfg.traffic.model == "ltm") {
-        LtmTrafficModel::Config ltm_cfg;
-        ltm_cfg.time_step_s = cfg.traffic.ltm_time_step_s;
-        sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, ltm_cfg));
+        sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph));
     } else {
         sim.set_traffic_model(std::make_unique<QueueTrafficModel>(*graph));
     }

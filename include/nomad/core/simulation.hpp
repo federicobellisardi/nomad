@@ -5,6 +5,7 @@
 #include <nomad/core/graph.hpp>
 #include <nomad/core/types.hpp>
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -126,6 +127,13 @@ private:
     std::atomic<std::size_t> events_processed_{0};
     std::atomic<uint64_t>    n_depart_{0}, n_enter_{0}, n_exit_{0}, n_arrive_{0};
     std::atomic<uint64_t>    n_teleported_{0};
+
+    // Diagnostics: reroute_count / road_class of every agent at the moment it
+    // is teleported (captured in teleport_stuck_agents before state is
+    // overwritten) — used to check whether teleported agents are routing-loop
+    // victims (reroute_count saturated at cfg_.max_reroutes) or something else.
+    std::array<uint64_t, 32>  teleported_by_reroute_count_{};
+    std::array<uint64_t, 256> teleported_by_class_{};
 
     SimTime last_reroute_t_{-1e9f};
     SimTime last_teleport_t_{-1e9f};
