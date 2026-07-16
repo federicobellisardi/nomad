@@ -1,5 +1,6 @@
 #include <nomad/config/scenario_config.hpp>
 
+#include <cstdio>
 #include <fstream>
 #include <stdexcept>
 
@@ -11,13 +12,23 @@ namespace nomad {
 using json = nlohmann::json;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-static AgentMode str_to_mode(const std::string& s) {
-    if (s == "car")     return AgentMode::Car;
-    if (s == "bike")    return AgentMode::Bike;
-    if (s == "walk")    return AgentMode::Walk;
-    if (s == "transit") return AgentMode::Transit;
-    return AgentMode::Car;
+
+// Accept either a plain number (seconds since midnight) or a datetime string
+// in "YYYY-MM-DD HH:MM:SS" format.  Only the time portion is used.
+static SimTime parse_sim_time(const json& val) {
+    if (val.is_number()) return val.get<SimTime>();
+    if (val.is_string()) {
+        const std::string& s = val.get<std::string>();
+        auto sp = s.find(' ');
+        const char* t = (sp != std::string::npos) ? s.c_str() + sp + 1 : s.c_str();
+        int h = 0, m = 0, sec = 0;
+        std::sscanf(t, "%d:%d:%d", &h, &m, &sec);
+        return static_cast<SimTime>(h * 3600 + m * 60 + sec);
+    }
+    throw std::runtime_error(
+        "start_time / end_time must be a number (seconds) or \"YYYY-MM-DD HH:MM:SS\"");
 }
+
 
 // ── Load ──────────────────────────────────────────────────────────────────────
 ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
@@ -33,11 +44,30 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
     // ── simulation ──────────────────────────────────────────────────────────
     if (j.contains("simulation")) {
         const auto& s = j["simulation"];
-        cfg.simulation.start_time    = s.value("start_time_s", cfg.simulation.start_time);
-        cfg.simulation.end_time      = s.value("end_time_s",   cfg.simulation.end_time);
-        cfg.simulation.sync_window_s = s.value("sync_window_s",cfg.simulation.sync_window_s);
-        cfg.simulation.reroute_thresh= s.value("reroute_thresh",cfg.simulation.reroute_thresh);
-        cfg.simulation.num_threads   = s.value("num_threads",  cfg.simulation.num_threads);
+        // Accept "start_time" (datetime string, new format) or
+        // legacy "start_time_s" (plain seconds).
+        if (s.contains("start_time")) {
+            cfg.simulation.start_time = parse_sim_time(s["start_time"]);
+            if (s["start_time"].is_string()) {
+                const std::string& raw = s["start_time"].get<std::string>();
+                auto sp = raw.find(' ');
+                if (sp != std::string::npos) cfg.sim_date = raw.substr(0, sp);
+            }
+        } else if (s.contains("start_time_s"))
+            cfg.simulation.start_time = parse_sim_time(s["start_time_s"]);
+
+        if (s.contains("end_time"))
+            cfg.simulation.end_time = parse_sim_time(s["end_time"]);
+        else if (s.contains("end_time_s"))
+            cfg.simulation.end_time = parse_sim_time(s["end_time_s"]);
+        cfg.simulation.sync_window_s         = s.value("sync_window_s",         cfg.simulation.sync_window_s);
+        cfg.simulation.reroute_thresh        = s.value("reroute_thresh",        cfg.simulation.reroute_thresh);
+        cfg.simulation.reroute_interval_s    = s.value("reroute_interval_s",    cfg.simulation.reroute_interval_s);
+        cfg.simulation.stuck_threshold_ratio = s.value("stuck_threshold_ratio", cfg.simulation.stuck_threshold_ratio);
+        cfg.simulation.teleport_interval_s   = s.value("teleport_interval_s",   cfg.simulation.teleport_interval_s);
+        cfg.simulation.max_reroutes          = s.value("max_reroutes",          cfg.simulation.max_reroutes);
+        cfg.simulation.stuck_max_hours       = s.value("stuck_max_hours",       cfg.simulation.stuck_max_hours);
+        cfg.simulation.num_threads           = s.value("num_threads",           cfg.simulation.num_threads);
         cfg.simulation.store_traces  = s.value("store_traces", cfg.simulation.store_traces);
         cfg.simulation.traffic_model = s.value("traffic_model",cfg.simulation.traffic_model);
         cfg.simulation.router        = s.value("router",       cfg.simulation.router);
@@ -55,6 +85,8 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
             cfg.network.osm_tag_config = n["osm_tag_config"].get<std::string>();
         if (n.contains("gtfs_dir"))
             cfg.network.gtfs_dir = n["gtfs_dir"].get<std::string>();
+        if (n.contains("graph_bin"))
+            cfg.network.graph_bin = n["graph_bin"].get<std::string>();
         if (n.contains("bbox")) {
             const auto& b = n["bbox"];
             cfg.network.bbox = NetworkConfig::BBox{
@@ -70,10 +102,13 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.routing.preprocess_ch    = r.value("preprocess_ch",   cfg.routing.preprocess_ch);
         cfg.routing.reroute_threshold= r.value("reroute_threshold",cfg.routing.reroute_threshold);
         cfg.routing.cache_entries    = r.value("cache_entries",   cfg.routing.cache_entries);
-        cfg.routing.use_traffic_costs= r.value("use_traffic_costs",cfg.routing.use_traffic_costs);
+        cfg.routing.use_traffic_costs   = r.value("use_traffic_costs",   cfg.routing.use_traffic_costs);
+        cfg.routing.randomization_sigma = r.value("randomization_sigma", cfg.routing.randomization_sigma);
         if (r.contains("ch_cache"))
             cfg.routing.ch_cache = r["ch_cache"].get<std::string>();
     }
+    // Cross-section: propagate randomization sigma to simulation config
+    cfg.simulation.route_randomization_sigma = cfg.routing.randomization_sigma;
 
     // ── traffic ─────────────────────────────────────────────────────────────
     if (j.contains("traffic")) {
@@ -85,7 +120,8 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
     // ── demand ──────────────────────────────────────────────────────────────
     if (j.contains("demand")) {
         const auto& d = j["demand"];
-        cfg.demand.source = d.value("source", cfg.demand.source);
+        cfg.demand.source       = d.value("source",       cfg.demand.source);
+        cfg.demand.demand_scale = d.value("demand_scale", cfg.demand.demand_scale);
         if (d.contains("od_csv"))
             cfg.demand.od_csv = d["od_csv"].get<std::string>();
         if (d.contains("person_trips_csv"))
@@ -158,10 +194,21 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["name"]    = cfg.name;
     j["version"] = cfg.version;
 
-    j["simulation"]["start_time_s"]       = cfg.simulation.start_time;
-    j["simulation"]["end_time_s"]         = cfg.simulation.end_time;
+    // Serialise as datetime strings so sim_date survives a round-trip.
+    auto fmt_dt = [&](SimTime t) -> std::string {
+        int h = static_cast<int>(t) / 3600;
+        int m = (static_cast<int>(t) % 3600) / 60;
+        int s = static_cast<int>(t) % 60;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
+        const std::string& date = cfg.sim_date.empty() ? "1970-01-01" : cfg.sim_date;
+        return date + " " + buf;
+    };
+    j["simulation"]["start_time"]         = fmt_dt(cfg.simulation.start_time);
+    j["simulation"]["end_time"]           = fmt_dt(cfg.simulation.end_time);
     j["simulation"]["sync_window_s"]      = cfg.simulation.sync_window_s;
     j["simulation"]["reroute_thresh"]     = cfg.simulation.reroute_thresh;
+    j["simulation"]["reroute_interval_s"] = cfg.simulation.reroute_interval_s;
     j["simulation"]["num_threads"]        = cfg.simulation.num_threads;
     j["simulation"]["store_traces"]       = cfg.simulation.store_traces;
     j["simulation"]["traffic_model"]      = cfg.simulation.traffic_model;
@@ -173,6 +220,8 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["network"]["extract_transit"]  = cfg.network.extract_transit;
     if (cfg.network.gtfs_dir)
         j["network"]["gtfs_dir"]     = cfg.network.gtfs_dir->string();
+    if (cfg.network.graph_bin)
+        j["network"]["graph_bin"]    = cfg.network.graph_bin->string();
 
     j["routing"]["algorithm"]        = cfg.routing.algorithm;
     j["routing"]["preprocess_ch"]    = cfg.routing.preprocess_ch;
@@ -195,10 +244,15 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
 
 // ── Validate ──────────────────────────────────────────────────────────────────
 std::string ScenarioConfigIO::validate(const ScenarioConfig& cfg) {
-    if (cfg.network.osm_pbf.empty())
-        return "network.osm_pbf is required";
-    if (!std::filesystem::exists(cfg.network.osm_pbf))
-        return "network.osm_pbf does not exist: " + cfg.network.osm_pbf.string();
+    // graph_bin that already exists makes osm_pbf optional
+    bool has_bin = cfg.network.graph_bin &&
+                   std::filesystem::exists(*cfg.network.graph_bin);
+    if (!has_bin) {
+        if (cfg.network.osm_pbf.empty())
+            return "network.osm_pbf is required (no graph_bin cache found)";
+        if (!std::filesystem::exists(cfg.network.osm_pbf))
+            return "network.osm_pbf does not exist: " + cfg.network.osm_pbf.string();
+    }
     if (cfg.simulation.end_time <= cfg.simulation.start_time)
         return "simulation.end_time must be > start_time";
     if (cfg.demand.source == "od_csv" && !cfg.demand.od_csv)

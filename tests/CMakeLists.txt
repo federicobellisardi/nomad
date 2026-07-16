@@ -4,6 +4,7 @@ add_executable(nomad_tests
     unit/test_traffic.cpp
     unit/test_event_queue.cpp
     unit/test_agent_store.cpp
+    unit/test_od_matrix.cpp
     integration/test_simulation_synthetic.cpp
 )
 

@@ -20,11 +20,12 @@ namespace nomad {
 // Every field has a sensible default; only non-default values need to appear.
 
 struct NetworkConfig {
-    std::filesystem::path osm_pbf;          // required: OSM PBF file
+    std::filesystem::path osm_pbf;          // required unless graph_bin exists
     std::filesystem::path osm_tag_config;   // optional: YAML tag rules
     bool simplify_topology = true;
     bool extract_transit   = true;          // extract bus stops / railway
-    std::optional<std::filesystem::path> gtfs_dir; // GTFS feed for PT
+    std::optional<std::filesystem::path> gtfs_dir;   // GTFS feed for PT
+    std::optional<std::filesystem::path> graph_bin;  // binary graph cache (load if exists, save after build)
 
     // Bounding box filter (optional; default = full file)
     struct BBox { float min_lon, min_lat, max_lon, max_lat; };
@@ -37,7 +38,12 @@ struct RoutingConfig {
     std::optional<std::filesystem::path> ch_cache; // load/save preprocessed CH
     float reroute_threshold = 0.25f;
     std::size_t cache_entries = 500'000;
-    bool use_traffic_costs = true;   // dynamic costs from traffic model
+    bool  use_traffic_costs      = true;   // dynamic costs from traffic model
+    // Stochastic pre-routing: fraction sigma of agents use A* with log-normal
+    // road-class cost perturbation instead of deterministic CH.
+    // sigma = std-dev of Normal before exp(); 0 = disabled (pure CH).
+    // Recommended: 0.2–0.4 for cities with heavy motorway concentration.
+    float randomization_sigma    = 0.0f;
 };
 
 struct TrafficConfig {
@@ -74,6 +80,11 @@ struct DemandConfig {
     // activity_plan (ActivitySim)
     std::optional<std::filesystem::path> person_trips_csv;
     std::optional<std::filesystem::path> maz_to_node_csv;
+
+    // Demand scaling: multiply all OD counts by this factor [0, 1].
+    // Use to calibrate against observed traffic counts or correct for modal-share
+    // uncertainty in raw mobility data (e.g. MITMA).
+    float demand_scale = 1.0f;
 };
 
 struct ModeChoiceConfig {
@@ -99,6 +110,7 @@ struct OutputConfig {
 struct ScenarioConfig {
     std::string name    = "nomad_scenario";
     std::string version = "0.1";
+    std::string sim_date;  // date portion of start_time ("YYYY-MM-DD"), empty if not set
 
     SimulationConfig simulation;
     NetworkConfig    network;
@@ -108,6 +120,15 @@ struct ScenarioConfig {
     ModeChoiceConfig mode_choice;
     OutputConfig     output;
 };
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+inline AgentMode str_to_mode(const std::string& s) {
+    if (s == "car"     || s == "Car")     return AgentMode::Car;
+    if (s == "bike"    || s == "Bike")    return AgentMode::Bike;
+    if (s == "walk"    || s == "Walk")    return AgentMode::Walk;
+    if (s == "transit" || s == "Transit") return AgentMode::Transit;
+    return AgentMode::Car;
+}
 
 // ── JSON loader/saver ─────────────────────────────────────────────────────────
 class ScenarioConfigIO {

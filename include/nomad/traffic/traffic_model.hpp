@@ -75,6 +75,11 @@ public:
     // Read-only view of link states for output writers and Python bindings
     virtual std::span<const LinkState> link_states() const = 0;
 
+    // Forcibly remove an agent from a link (teleport). Unlike on_exit(), this
+    // always succeeds and does not enforce flow capacity. Used by the stuck-agent
+    // teleport mechanism to clear agents that have exceeded their time budget.
+    virtual void force_remove(EdgeId e, AgentId a) { (void)e; (void)a; }
+
     virtual std::string_view model_name() const = 0;
 };
 

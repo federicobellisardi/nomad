@@ -41,7 +41,7 @@ enum class RoadClass : uint8_t {
     Service      = 12,
     Unclassified = 13,
     Track        = 14,
-    Cycleway     = 15,  // ← cars cannot use from here on
+    Cycleway     = 15,  // ← cars cannot use from here on (too low capacity / not through-roads)
     Footway      = 16,
     Path         = 17,
     Steps        = 18,
@@ -64,7 +64,7 @@ enum class AgentMode : uint8_t {
 inline constexpr bool road_class_accessible(RoadClass klass, AgentMode mode) noexcept {
     switch (mode) {
     case AgentMode::Car:
-        return klass <= RoadClass::Track;          // 0–14 only
+        return klass <= RoadClass::Unclassified;   // 0–13: exclude Track/Cycleway/Footway/Path/Steps
     case AgentMode::Bike:
         return klass != RoadClass::Motorway &&
                klass != RoadClass::MotorwayLink &&

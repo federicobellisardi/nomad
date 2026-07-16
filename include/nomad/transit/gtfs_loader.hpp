@@ -94,14 +94,18 @@ struct TransitLine {
 // drive event-based vehicle scheduling. Agents can board/alight via
 // standard AgentEnterLink/ExitLink events on special PT edges.
 // For optimal multi-modal routing, RAPTOR is planned as a Phase 6 addition.
+// Config defined outside GtfsLoader to avoid GCC 13 bug with nested-struct
+// default member initializers used as constructor default arguments.
+struct GtfsLoaderConfig {
+    float snap_radius_m  = 50.0f;
+    bool  insert_nodes   = true;
+    bool  load_shapes    = false;
+    std::string service_date = "";
+};
+
 class GtfsLoader {
 public:
-    struct Config {
-        float snap_radius_m  = 50.0f;  // max distance to snap stop → road node
-        bool  insert_nodes   = true;   // insert new graph nodes for unsnapped stops
-        bool  load_shapes    = false;  // load shape geometry (large memory)
-        std::string service_date = ""; // YYYYMMDD; empty = load all services
-    };
+    using Config = GtfsLoaderConfig;
 
     explicit GtfsLoader(Config cfg = {});
 

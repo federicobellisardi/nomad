@@ -4,8 +4,8 @@
   "version": "0.1",
 
   "simulation": {
-    "start_time_s": 25200,
-    "end_time_s": 28800,
+    "start_time": "2024-01-08 07:00:00",
+    "end_time":   "2024-01-08 08:00:00",
     "sync_window_s": 1.0,
     "reroute_thresh": 0.30,
     "num_threads": 0,

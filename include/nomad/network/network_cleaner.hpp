@@ -34,10 +34,11 @@ namespace nomad {
 class NetworkCleaner {
 public:
     struct Config {
-        uint32_t min_component_size = 5;   // discard components smaller than this
+        uint32_t min_component_size = 5;    // discard components smaller than this
         bool     simplify_topology  = true; // collapse degree-2 chains
         bool     remove_self_loops  = true;
         bool     remove_duplicates  = true;
+        float    min_edge_length_m  = 20.0f; // also collapse degree-2 nodes on edges shorter than this
     };
 
     struct Report {

@@ -20,6 +20,7 @@ include(cmake/Dependencies.cmake)
 # ── Core library ─────────────────────────────────────────────────────────────
 add_library(nomad_core STATIC
     src/core/graph.cpp
+    src/core/graph_io.cpp
     src/core/agent.cpp
     src/core/event.cpp
     src/core/simulation.cpp
@@ -83,6 +84,8 @@ if(NOMAD_BUILD_PYTHON)
     target_link_libraries(_nomad_core PRIVATE nomad_core)
     set_target_properties(_nomad_core PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/python/nomad"
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
     )
 endif()
 

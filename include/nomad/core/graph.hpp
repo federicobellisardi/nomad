@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <utility>
@@ -108,6 +109,12 @@ struct Graph {
 
     // Validate internal consistency (used in tests)
     bool validate() const;
+
+    // Binary cache I/O — format: "NOMG" magic + version + raw vectors.
+    // Guarantees node-ID stability: load() produces the same indices as the
+    // OsmLoader run that originally called save().
+    void save(const std::filesystem::path& path) const;
+    static Graph load(const std::filesystem::path& path);
 };
 
 // ── Haversine inline definition ───────────────────────────────────────────────

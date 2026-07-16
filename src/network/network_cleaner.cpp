@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <functional>
 
 #include <spdlog/spdlog.h>
 
@@ -21,8 +22,7 @@ Graph NetworkCleaner::clean(Graph g) {
 
     if (cfg_.remove_self_loops)   remove_self_loops(g);
     if (cfg_.remove_duplicates)   remove_duplicate_edges(g);
-    // simplify_degree2_nodes is O(N²) — disabled until reverse-adjacency is built
-    // if (cfg_.simplify_topology)   simplify_degree2_nodes(g);
+    if (cfg_.simplify_topology)   simplify_degree2_nodes(g);
     remove_small_components(g);
     reindex(g);
 
@@ -91,21 +91,26 @@ void NetworkCleaner::remove_small_components(Graph& g) {
         }
     }
 
-    // Remove edges connecting to removed nodes
+    // Mark edges TO removed nodes
     const uint32_t E = g.num_edges();
     for (uint32_t e = 0; e < E; ++e) {
         NodeId t = g.edges[e].target;
         if (t == kInvalidNode || t >= N || !keep[t])
             g.edges[e].target = kInvalidNode;
     }
-
-    // Mark nodes for removal by setting their row_ptr interval to empty
-    // (handled by reindex)
+    // Mark edges FROM removed nodes.
+    // Previously this was done by zeroing row_ptr[u+1], but that corrupts the CSR
+    // layout for the immediately following kept node: it would inherit the removed
+    // node's edge slots in reindex(), assigning them a wrong source node while
+    // keeping the original length_m — producing edges whose endpoints are many km
+    // apart but whose length_m is only a few metres.
     for (uint32_t u = 0; u < N; ++u) {
         if (!keep[u]) {
-            g.row_ptr[u + 1] = g.row_ptr[u]; // zero out-degree
+            for (EdgeId eid : g.out_edges(u))
+                g.edges[eid].target = kInvalidNode;
         }
     }
+    // reindex() compacts the graph; no row_ptr surgery needed here.
 }
 
 // ── Self-loop removal ─────────────────────────────────────────────────────────
@@ -145,88 +150,181 @@ void NetworkCleaner::remove_duplicate_edges(Graph& g) {
 }
 
 // ── Degree-2 node simplification ─────────────────────────────────────────────
-// A degree-2 node that is NOT a traffic signal and NOT a dead end can be
-// contracted: its two edges are merged into one longer edge.
+// Contracts pass-through nodes that connect exactly two distinct undirected
+// neighbours. Handles both one-way (in=1, out=1) and bidirectional (in=2,
+// out=2 with 2 distinct nodes) segments. Runs in O(N+E) using precomputed
+// reverse adjacency and a worklist; no O(N²) predecessor scan.
+//
+// Also collapses Simple nodes whose shortest incident edge is below
+// cfg_.min_edge_length_m even if they nominally have higher directed degree
+// (handles split-node artefacts at complex intersections).
 void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
     const uint32_t N = g.num_nodes();
+    const uint32_t E = g.num_edges();
 
-    // Compute in-degree (counting valid edges only)
-    std::vector<uint32_t> in_degree(N, 0);
-    for (uint32_t u = 0; u < N; ++u) {
+    // ── Pre-compute edge→source mapping ──────────────────────────────────────
+    std::vector<NodeId> edge_src(E, kInvalidNode);
+    for (uint32_t u = 0; u < N; ++u)
+        for (EdgeId eid : g.out_edges(u))
+            edge_src[eid] = u;
+
+    // ── Pre-compute per-node in-edge lists ───────────────────────────────────
+    // Entries become stale as targets are redirected; always filter by
+    // checking g.edges[eid].target == u before using.
+    std::vector<std::vector<EdgeId>> in_edges(N);
+    in_edges.reserve(N);
+    for (uint32_t e = 0; e < E; ++e) {
+        NodeId v = g.edges[e].target;
+        if (v != kInvalidNode && v < N)
+            in_edges[v].push_back(static_cast<EdgeId>(e));
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    // Valid in-edges to u: filter stale entries (target may have been redirected).
+    auto valid_in = [&](NodeId u, std::vector<EdgeId>& out) {
+        out.clear();
+        for (EdgeId eid : in_edges[u])
+            if (g.edges[eid].target == u)
+                out.push_back(eid);
+    };
+
+    // Valid out-edges from u (non-invalidated, non-self-loop).
+    auto valid_out = [&](NodeId u, std::vector<EdgeId>& out) {
+        out.clear();
         for (EdgeId eid : g.out_edges(u)) {
-            if (g.edges[eid].target != kInvalidNode)
-                ++in_degree[g.edges[eid].target];
+            NodeId v = g.edges[eid].target;
+            if (v != kInvalidNode && v != u)
+                out.push_back(eid);
+        }
+    };
+
+    // Distinct undirected neighbours of u (sources of in-edges + targets of
+    // out-edges, excluding u itself).
+    auto undir_nb = [&](NodeId u, std::vector<EdgeId>& ins,
+                         std::vector<EdgeId>& outs,
+                         std::vector<NodeId>& nb) {
+        valid_in(u, ins);
+        valid_out(u, outs);
+        nb.clear();
+        for (EdgeId e : ins)  { NodeId s = edge_src[e]; if (s != kInvalidNode && s != u) nb.push_back(s); }
+        for (EdgeId e : outs) nb.push_back(g.edges[e].target);
+        std::sort(nb.begin(), nb.end());
+        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+    };
+
+    // Is node u eligible for contraction?
+    // Criterion A: exactly 2 undirected neighbours and Simple type.
+    // Criterion B: Simple type and at least one incident edge < min_edge_length_m
+    //              and exactly 2 undirected neighbours (regardless of directed degree).
+    auto contractable = [&](NodeId u,
+                             std::vector<EdgeId>& ins,
+                             std::vector<EdgeId>& outs,
+                             std::vector<NodeId>& nb) -> bool {
+        if (g.nodes[u].intersection_type != static_cast<uint8_t>(IntersectionType::Simple))
+            return false;
+        undir_nb(u, ins, outs, nb);
+        if (nb.size() != 2) return false;
+
+        // Check if this is a strict degree-2 node: each of the 2 undirected
+        // neighbours provides exactly 1 in-edge and 1 out-edge.
+        bool is_strict_degree2 = true;
+        for (NodeId X : nb) {
+            uint32_t n_in = 0, n_out = 0;
+            for (EdgeId e : ins)  if (edge_src[e] == X) ++n_in;
+            for (EdgeId e : outs) if (g.edges[e].target == X) ++n_out;
+            if (n_in != 1 || n_out != 1) { is_strict_degree2 = false; break; }
+        }
+
+        if (is_strict_degree2) {
+            // Criterion A: pass-through node on a straight road segment — always contract.
+        } else if (cfg_.min_edge_length_m > 0.0f) {
+            // Criterion B: not strict degree-2, but at least one incident edge is a
+            // micro-segment (<min_edge_length_m). Contract to clean up OSM split artefacts.
+            bool has_short = false;
+            for (EdgeId e : ins)
+                if (g.edges[e].length_m < cfg_.min_edge_length_m) { has_short = true; break; }
+            if (!has_short)
+                for (EdgeId e : outs)
+                    if (g.edges[e].length_m < cfg_.min_edge_length_m) { has_short = true; break; }
+            if (!has_short) return false;
+        } else {
+            return false; // strict mode: skip non-strict nodes
+        }
+        return true;
+    };
+
+    // ── Initialise worklist ───────────────────────────────────────────────────
+    std::queue<NodeId> wl;
+    std::vector<bool>  in_wl(N, false);
+    std::vector<EdgeId> tmp_ins, tmp_outs;
+    std::vector<NodeId> tmp_nb;
+
+    for (uint32_t u = 0; u < N; ++u) {
+        if (contractable(u, tmp_ins, tmp_outs, tmp_nb)) {
+            wl.push(u);
+            in_wl[u] = true;
         }
     }
 
-    uint32_t simplified = 0;
-    // Iterate until no more degree-2 nodes can be contracted
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (uint32_t u = 0; u < N; ++u) {
-            // Skip signal nodes and already-removed nodes
-            const auto& nd = g.nodes[u];
-            if (nd.intersection_type != static_cast<uint8_t>(IntersectionType::Simple))
-                continue;
+    uint32_t contracted = 0;
 
-            // Count valid out-edges
-            uint32_t out = 0;
-            EdgeId out_edge = kInvalidEdge;
-            for (EdgeId eid : g.out_edges(u)) {
-                if (g.edges[eid].target != kInvalidNode) {
-                    ++out;
-                    out_edge = eid;
-                }
+    // ── Worklist processing ───────────────────────────────────────────────────
+    while (!wl.empty()) {
+        NodeId u = wl.front(); wl.pop();
+        in_wl[u] = false;
+
+        if (!contractable(u, tmp_ins, tmp_outs, tmp_nb)) continue;
+
+        std::vector<EdgeId>& ins  = tmp_ins;
+        std::vector<EdgeId>& outs = tmp_outs;
+        std::vector<NodeId>& nb   = tmp_nb;
+
+        NodeId A = nb[0], B = nb[1];
+
+        // For each in-edge (X→u), find the pass-through out-edge (u→Y, Y≠X).
+        // Redirect X→u to X→Y and invalidate u→Y.
+        for (EdgeId in_e : ins) {
+            NodeId X = edge_src[in_e];
+            if (X == kInvalidNode) continue;
+            NodeId Y = (X == A) ? B : A;  // the other neighbour
+
+            // Find u→Y
+            EdgeId out_e = kInvalidEdge;
+            for (EdgeId oe : outs) {
+                if (g.edges[oe].target == Y) { out_e = oe; break; }
             }
+            if (out_e == kInvalidEdge) continue;
 
-            if (out != 1 || in_degree[u] != 1) continue;
+            // Merge: X→u→Y becomes X→Y
+            g.edges[in_e].target         = Y;
+            g.edges[in_e].length_m      += g.edges[out_e].length_m;
+            g.edges[in_e].free_flow_speed = std::min(g.edges[in_e].free_flow_speed,
+                                                      g.edges[out_e].free_flow_speed);
+            g.edges[in_e].capacity        = std::min(g.edges[in_e].capacity,
+                                                      g.edges[out_e].capacity);
 
-            // u has exactly 1 in-edge and 1 out-edge → can be contracted
-            // Find the predecessor node
-            NodeId succ = g.edges[out_edge].target;
-            if (succ == u) continue; // self-loop guard
+            // Track the redirected edge so Y knows about it
+            in_edges[Y].push_back(in_e);
 
-            // Find predecessor of u (the node with an edge to u)
-            // This requires scanning all predecessors — O(N) worst case.
-            // For production, maintain an explicit reverse adjacency.
-            // Here we do a simple scan for correctness.
-            NodeId pred = kInvalidNode;
-            EdgeId pred_edge = kInvalidEdge;
-            for (uint32_t p = 0; p < N; ++p) {
-                for (EdgeId eid : g.out_edges(p)) {
-                    if (g.edges[eid].target == u && eid != out_edge) {
-                        pred = p;
-                        pred_edge = eid;
-                        break;
-                    }
-                }
-                if (pred != kInvalidNode) break;
+            // Invalidate the absorbed out-edge
+            g.edges[out_e].target = kInvalidNode;
+        }
+
+        ++contracted;
+
+        // Neighbours may now satisfy the degree-2 criterion
+        for (NodeId nb_node : {A, B}) {
+            if (nb_node == kInvalidNode || in_wl[nb_node]) continue;
+            if (contractable(nb_node, tmp_ins, tmp_outs, tmp_nb)) {
+                wl.push(nb_node);
+                in_wl[nb_node] = true;
             }
-
-            if (pred == kInvalidNode || pred == succ) continue;
-
-            // Merge: extend pred→u edge to pred→succ
-            g.edges[pred_edge].target   = succ;
-            g.edges[pred_edge].length_m += g.edges[out_edge].length_m;
-            // Take minimum speed (conservative)
-            g.edges[pred_edge].free_flow_speed =
-                std::min(g.edges[pred_edge].free_flow_speed,
-                          g.edges[out_edge].free_flow_speed);
-            // Concatenate geometry
-            // (omitted for brevity; production would merge geom_coords here)
-
-            // Invalidate u's out-edge
-            g.edges[out_edge].target = kInvalidNode;
-            in_degree[succ] -= 1; // u's out-edge removed
-            // u now has 0 valid out-edges; it will be removed by reindex
-
-            ++simplified;
-            changed = true;
         }
     }
 
-    report_.nodes_simplified = simplified;
+    report_.nodes_simplified = contracted;
+    spdlog::info("NetworkCleaner: simplified {} degree-2 nodes (min_edge_length_m={})",
+                 contracted, cfg_.min_edge_length_m);
 }
 
 // ── Reindex: compact the graph after edge/node removals ───────────────────────

@@ -37,12 +37,13 @@ public:
         return s;
     }
 
-    // Uniform in [a_s, b_s)
+    // Uniform in [a_s, b_s). If a_s > b_s they are swapped — guards against
+    // callers that pass (mean, sigma) from an older lognormal-format CSV.
     static DepartureSampler uniform(float a_s, float b_s) {
         DepartureSampler s;
         s.dist_ = Distribution::Uniform;
-        s.mean_ = a_s;
-        s.std_  = b_s;
+        s.mean_ = std::min(a_s, b_s);
+        s.std_  = std::max(a_s, b_s);
         return s;
     }
 

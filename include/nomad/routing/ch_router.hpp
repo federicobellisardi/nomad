@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace nomad {
@@ -38,8 +40,9 @@ namespace nomad {
 class CHRouter final : public IRouter {
 public:
     struct PreprocessConfig {
-        uint32_t num_threads   = 0;     // 0 = hardware_concurrency
-        bool     verbose       = false;
+        uint32_t  num_threads = 0;            // 0 = hardware_concurrency
+        bool      verbose     = false;
+        AgentMode mode        = AgentMode::Car; // which edges are usable
     };
 
     explicit CHRouter(const Graph& graph);
@@ -94,22 +97,24 @@ private:
     };
 
     Route  ch_query(NodeId s, NodeId t, AgentMode mode) const;
-    Route  unpack_path(NodeId s, NodeId t,
+    Route  unpack_path(NodeId s, NodeId t, NodeId meeting,
                         const std::vector<NodeId>& fwd_prev,
                         const std::vector<NodeId>& bwd_prev) const;
+    void   expand_path(NodeId u, NodeId w, std::vector<NodeId>& node_seq) const;
 
-    void   contract_node(NodeId v, CHGraph& cg);
-    int    edge_difference(NodeId v) const;
     void   build_augmented_graph();
 
-    const Graph&                     graph_;
+    const Graph&                        graph_;
     const std::vector<TurnRestriction>& restrictions_;
-    PreprocessConfig                 pp_cfg_;
-    CHGraph                          ch_;
-    bool                             preprocessed_{false};
-    RouteCache*                      cache_{nullptr};
+    PreprocessConfig                    pp_cfg_;
+    CHGraph                             ch_;
+    bool                                preprocessed_{false};
+    RouteCache*                         cache_{nullptr};
 
-    mutable std::vector<ThreadData>  tls_;
+    // shortcut lookup: (source<<32|target) → (via, weight)
+    std::unordered_map<uint64_t, std::pair<NodeId, float>> sc_lookup_;
+
+    mutable std::vector<ThreadData>     tls_;
 };
 
 } // namespace nomad

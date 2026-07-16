@@ -15,6 +15,13 @@ install_manifest.txt
 data/test_osm/
 data/test_data/
 
+# ── Downloaded / generated scenario data (regenerate via python/download_data,
+# python/preprocessing) ───────────────────────────────────────────────────────
+data/fua/
+data/od_raw/
+data/osm/
+data/palma_de_mallorca/
+
 # ── Simulation results ────────────────────────────────────────────────────────
 results/
 nomad_output/

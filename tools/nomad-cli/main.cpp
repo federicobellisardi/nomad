@@ -56,7 +56,7 @@ See data/schemas/ for full JSON schema documentation.
 }
 
 // ── Build simulation from config ──────────────────────────────────────────────
-static int run_scenario(const ScenarioConfig& cfg) {
+static int run_scenario(ScenarioConfig cfg) {
     auto t0 = std::chrono::steady_clock::now();
 
     // Validate
@@ -67,14 +67,23 @@ static int run_scenario(const ScenarioConfig& cfg) {
     }
 
     // ── Network loading ───────────────────────────────────────────────────────
-    spdlog::info("Loading OSM network: {}", cfg.network.osm_pbf.string());
-    OsmTagConfig tag_cfg = cfg.network.osm_tag_config.empty()
-        ? OsmTagConfig::defaults()
-        : OsmTagConfig::load_yaml(cfg.network.osm_tag_config);
+    OsmLoader loader(OsmTagConfig::defaults()); // needed for turn_restrictions even if loading from cache
+    std::shared_ptr<Graph> graph;
 
-    OsmLoader loader(tag_cfg);
-    auto graph = std::make_shared<Graph>(
-        loader.load_and_clean(cfg.network.osm_pbf, cfg.network.simplify_topology));
+    if (cfg.network.graph_bin && std::filesystem::exists(*cfg.network.graph_bin)) {
+        spdlog::info("Loading graph from cache: {}", cfg.network.graph_bin->string());
+        graph = std::make_shared<Graph>(Graph::load(*cfg.network.graph_bin));
+    } else {
+        if (!cfg.network.osm_tag_config.empty())
+            loader = OsmLoader(OsmTagConfig::load_yaml(cfg.network.osm_tag_config));
+        spdlog::info("Loading OSM network: {}", cfg.network.osm_pbf.string());
+        graph = std::make_shared<Graph>(
+            loader.load_and_clean(cfg.network.osm_pbf, cfg.network.simplify_topology));
+        if (cfg.network.graph_bin) {
+            graph->save(*cfg.network.graph_bin);
+            spdlog::info("Graph cache saved: {}", cfg.network.graph_bin->string());
+        }
+    }
 
     spdlog::info("Network: {} nodes, {} edges",
                   graph->num_nodes(), graph->num_edges());
@@ -175,8 +184,18 @@ static int run_scenario(const ScenarioConfig& cfg) {
     }
 
     if (cfg.demand.source == "od_csv") {
+        // Build allowed-modes list from config (empty = load all modes)
+        std::vector<AgentMode> allowed_modes;
+        for (const auto& m : cfg.demand.modes) {
+            if (m == "car")     allowed_modes.push_back(AgentMode::Car);
+            else if (m == "walk")    allowed_modes.push_back(AgentMode::Walk);
+            else if (m == "bike")    allowed_modes.push_back(AgentMode::Bike);
+            else if (m == "transit") allowed_modes.push_back(AgentMode::Transit);
+        }
         sim.set_demand(std::make_shared<OdMatrixDemand>(
-            OdMatrixDemand::from_csv(*cfg.demand.od_csv)));
+            OdMatrixDemand::from_csv(*cfg.demand.od_csv, 42,
+                cfg.simulation.start_time, cfg.simulation.end_time,
+                allowed_modes, cfg.demand.demand_scale)));
     } else if (cfg.demand.source == "gravity") {
         GravityDemand::Config gc;
         gc.total_agents = cfg.demand.synthetic.total_agents;
@@ -195,6 +214,25 @@ static int run_scenario(const ScenarioConfig& cfg) {
     } else {
         spdlog::error("Unknown demand source: {}", cfg.demand.source);
         return 1;
+    }
+
+    // ── Timestamped output subdir ─────────────────────────────────────────────
+    // Appends "{date}_{HH-MM}_{HH-MM}" to output_dir, e.g.
+    //   results/palma_de_mallorca/2022-02-08_06-00_11-00
+    {
+        auto fmt_hm = [](SimTime t) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%02d-%02d",
+                static_cast<int>(t) / 3600,
+                (static_cast<int>(t) % 3600) / 60);
+            return std::string(buf);
+        };
+        std::string subdir;
+        if (!cfg.sim_date.empty()) subdir = cfg.sim_date + "_";
+        subdir += fmt_hm(cfg.simulation.start_time) + "_"
+               +  fmt_hm(cfg.simulation.end_time);
+        cfg.output.output_dir /= subdir;
+        spdlog::info("Output dir: {}", cfg.output.output_dir.string());
     }
 
     // ── Output writers ────────────────────────────────────────────────────────

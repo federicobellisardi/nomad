@@ -1,0 +1,52 @@
+[
+  {
+    "scale": 0.4,
+    "agents": 285086,
+    "arrived": 243538,
+    "stuck": 41442,
+    "arrival_pct": 85.42615210848656,
+    "teleported": 44151,
+    "sim_wall_s": 668.7,
+    "wall_s": 696.1668345719991
+  },
+  {
+    "scale": 0.5,
+    "agents": 356825,
+    "arrived": 305906,
+    "stuck": 50806,
+    "arrival_pct": 85.7299796819169,
+    "teleported": 53305,
+    "sim_wall_s": 1196.7,
+    "wall_s": 1221.2225680950032
+  },
+  {
+    "scale": 0.6,
+    "agents": 428239,
+    "arrived": 367360,
+    "stuck": 60751,
+    "arrival_pct": 85.78387302417575,
+    "teleported": 63306,
+    "sim_wall_s": 1997.8,
+    "wall_s": 2026.3035216850003
+  },
+  {
+    "scale": 0.7,
+    "agents": 498982,
+    "arrived": 436905,
+    "stuck": 61956,
+    "arrival_pct": 87.5592706750945,
+    "teleported": 134554,
+    "sim_wall_s": 3576.9,
+    "wall_s": 4392.9026730059995
+  },
+  {
+    "scale": 0.84,
+    "agents": 599360,
+    "arrived": 584513,
+    "stuck": 14847,
+    "arrival_pct": 97.52285771489589,
+    "teleported": 582258,
+    "sim_wall_s": 2240.2,
+    "wall_s": 3210.6450076919973
+  }
+]

@@ -84,7 +84,7 @@ PYBIND11_MODULE(_nomad_core, m) {
                 owner
             );
         }, py::keep_alive<0,1>())
-        // Zero-copy edge lengths
+        // Zero-copy edge lengths [m]
         .def("edge_lengths", [](const std::shared_ptr<Graph>& g) {
             auto owner = py::cast(g);
             return py::array_t<float>(
@@ -93,7 +93,49 @@ PYBIND11_MODULE(_nomad_core, m) {
                 &g->edges[0].length_m, owner
             );
         }, py::keep_alive<0,1>())
-        .def("validate", &Graph::validate);
+        // Zero-copy edge target node IDs (parallel to edges)
+        .def("edge_targets", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<uint32_t>(
+                {static_cast<py::ssize_t>(g->num_edges())},
+                {static_cast<py::ssize_t>(sizeof(EdgeData))},
+                reinterpret_cast<const uint32_t*>(&g->edges[0].target), owner
+            );
+        }, py::keep_alive<0,1>())
+        // CSR row pointers — size (num_nodes + 1). diff gives out-degree per node.
+        .def("row_ptr", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<uint32_t>(
+                {static_cast<py::ssize_t>(g->row_ptr.size())},
+                {static_cast<py::ssize_t>(sizeof(uint32_t))},
+                g->row_ptr.data(), owner
+            );
+        }, py::keep_alive<0,1>())
+        // Free-flow speeds [m/s]
+        .def("edge_speeds", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<float>(
+                {static_cast<py::ssize_t>(g->num_edges())},
+                {static_cast<py::ssize_t>(sizeof(EdgeData))},
+                &g->edges[0].free_flow_speed, owner
+            );
+        }, py::keep_alive<0,1>())
+        // Road class (uint8, RoadClass enum)
+        .def("edge_road_class", [](const std::shared_ptr<Graph>& g) {
+            auto owner = py::cast(g);
+            return py::array_t<uint8_t>(
+                {static_cast<py::ssize_t>(g->num_edges())},
+                {static_cast<py::ssize_t>(sizeof(EdgeData))},
+                &g->edges[0].road_class, owner
+            );
+        }, py::keep_alive<0,1>())
+        .def("validate", &Graph::validate)
+        .def("save", [](const std::shared_ptr<Graph>& g, const std::string& path) {
+            g->save(path);
+        }, py::arg("path"), "Save graph to binary cache file.")
+        .def_static("load", [](const std::string& path) {
+            return std::make_shared<Graph>(Graph::load(path));
+        }, py::arg("path"), "Load graph from binary cache file.");
 
     // ── OsmLoader ─────────────────────────────────────────────────────────────
     py::class_<OsmLoader>(m, "OsmLoader")
@@ -135,12 +177,26 @@ PYBIND11_MODULE(_nomad_core, m) {
             return ScenarioConfigIO::load(path);
         });
 
+    // ── IDemandModel (base, must be registered before derived classes) ───────
+    py::class_<IDemandModel, std::shared_ptr<IDemandModel>>(m, "IDemandModel");
+
     // ── OdMatrixDemand ────────────────────────────────────────────────────────
     py::class_<OdMatrixDemand, IDemandModel, std::shared_ptr<OdMatrixDemand>>(m, "OdMatrixDemand")
-        .def_static("from_csv", [](const std::string& path, uint32_t seed) {
+        .def_static("from_csv", [](const std::string& path, uint32_t seed,
+                                    float time_min_s, float time_max_s,
+                                    const std::vector<std::string>& modes) {
+            std::vector<AgentMode> allowed;
+            for (const auto& m : modes) {
+                if      (m == "car")     allowed.push_back(AgentMode::Car);
+                else if (m == "walk")    allowed.push_back(AgentMode::Walk);
+                else if (m == "bike")    allowed.push_back(AgentMode::Bike);
+                else if (m == "transit") allowed.push_back(AgentMode::Transit);
+            }
             return std::make_shared<OdMatrixDemand>(
-                OdMatrixDemand::from_csv(path, seed));
-        }, py::arg("csv_path"), py::arg("seed") = 42);
+                OdMatrixDemand::from_csv(path, seed, time_min_s, time_max_s, allowed));
+        }, py::arg("csv_path"), py::arg("seed") = 42,
+           py::arg("time_min_s") = -1e9f, py::arg("time_max_s") = 1e9f,
+           py::arg("modes") = std::vector<std::string>{});
 
     // ── GravityDemand ─────────────────────────────────────────────────────────
     py::class_<GravityDemand, IDemandModel, std::shared_ptr<GravityDemand>>(m, "GravityDemand")

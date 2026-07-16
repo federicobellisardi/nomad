@@ -115,6 +115,7 @@ if(NOT spdlog_FOUND)
     )
     set(SPDLOG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(SPDLOG_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
     FetchContent_MakeAvailable(spdlog)
 endif()
 

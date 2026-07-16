@@ -47,4 +47,5 @@ dependencies:
   - pip:
     - pydeck
     - keplergl
+    - requests
     - osmium             # pyosmium Python bindings (optional, for quick network inspection)

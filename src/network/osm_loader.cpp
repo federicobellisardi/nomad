@@ -42,16 +42,19 @@ OsmTagConfig OsmTagConfig::defaults() {
         {"tertiary_link", {RoadClass::TertiaryLink,   30.0f, 1,  700.0f}},
         {"residential",   {RoadClass::Residential,    30.0f, 1,  600.0f}},
         {"living_street", {RoadClass::LivingStreet,   10.0f, 1,  200.0f}},
-        {"service",       {RoadClass::Service,        20.0f, 1,  300.0f}},
+        {"service",       {RoadClass::Service,        30.0f, 1,  600.0f}},
         {"unclassified",  {RoadClass::Unclassified,   30.0f, 1,  500.0f}},
-        {"track",         {RoadClass::Track,          20.0f, 1,  200.0f}},
+        {"track",         {RoadClass::Track,          20.0f, 1,  400.0f}},
         {"cycleway",      {RoadClass::Cycleway,       15.0f, 1,  300.0f}},
         {"footway",       {RoadClass::Footway,         5.0f, 1,  600.0f}},
         {"path",          {RoadClass::Path,            5.0f, 1,  400.0f}},
         {"steps",         {RoadClass::Steps,           2.0f, 1,  200.0f}},
     };
 
-    cfg.car_access_tags = {"yes", "permissive", "designated", "private",
+    // "private" excluded: private roads (parking lots, resort driveways, gated
+    // estates) are not part of the public routing network. Including them causes
+    // CH to route through low-capacity links, creating artificial bottlenecks.
+    cfg.car_access_tags = {"yes", "permissive", "designated",
                             "destination", "delivery", "customers"};
     cfg.bike_access_tags = {"yes", "permissive", "designated", "private"};
     cfg.pedestrian_access_tags = {"yes", "permissive", "designated"};
@@ -518,7 +521,7 @@ Graph OsmLoader::load(const std::filesystem::path& osm_pbf) {
 Graph OsmLoader::load_and_clean(const std::filesystem::path& osm_pbf,
                                    bool simplify_topology) {
     Graph g = load(osm_pbf);
-    NetworkCleaner cleaner({5, simplify_topology, true, true});
+    NetworkCleaner cleaner({5, simplify_topology, true, true, 20.0f});
     return cleaner.clean(std::move(g));
 }
 
