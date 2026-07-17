@@ -256,6 +256,32 @@ def test_car_walk_bike_are_routed_as_distinct_modes(tmp_path):
         assert counts.get(EDGE_2_3, 0) == expected_count
 
 
+def test_router_route_and_mode_free_flow_time_without_running_simulation():
+    """Walk/bike never reroute (no congestion feedback — see module
+    docstring), so their pre-computed route IS their whole trip: this lets
+    per-edge timing be computed directly from a router query + the
+    deterministic mode_free_flow_time formula, with no Simulation.run() at
+    all. Confirms route()/mode_free_flow_time (added alongside
+    set_router/set_traffic_model) are self-consistent."""
+    graph = make_graph()
+    router = core.AStarRouter(graph)
+
+    car_route = router.route(core.RoutingRequest(0, 3, 0.0, core.AgentMode.Car))
+    assert car_route.is_valid
+    assert list(car_route.edges) == [EDGE_0_2_MOTORWAY, EDGE_2_3]
+
+    walk_route = router.route(core.RoutingRequest(0, 3, 0.0, core.AgentMode.Walk))
+    assert walk_route.is_valid
+    assert list(walk_route.edges) == [EDGE_0_1, EDGE_1_2, EDGE_2_3]
+
+    walk_speed, bike_speed = 1.39, 4.17
+    per_edge_total = sum(
+        graph.mode_free_flow_time(e, core.AgentMode.Walk, walk_speed, bike_speed)
+        for e in walk_route.edges
+    )
+    assert per_edge_total == pytest.approx(walk_route.estimated_time_s, rel=1e-4)
+
+
 def test_temporal_aggregation_across_hour_boundary(tmp_path):
     # Wave 1 departs at t in [0, 10) -> hour 0. Wave 2 departs at
     # t in [3700, 3710) -> hour 1. Edge traversal times here are tens of

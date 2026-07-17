@@ -14,6 +14,7 @@
 #include <nomad/routing/astar_router.hpp>
 #include <nomad/routing/ch_router.hpp>
 #include <nomad/routing/route_cache.hpp>
+#include <nomad/routing/router.hpp>
 #include <nomad/traffic/queue_model.hpp>
 #include <nomad/traffic/ltm_model.hpp>
 #include <nomad/transit/gtfs_loader.hpp>
@@ -216,7 +217,15 @@ PYBIND11_MODULE(_nomad_core, m) {
         }, py::arg("path"), "Save graph to binary cache file.")
         .def_static("load", [](const std::string& path) {
             return std::make_shared<Graph>(Graph::load(path));
-        }, py::arg("path"), "Load graph from binary cache file.");
+        }, py::arg("path"), "Load graph from binary cache file.")
+        .def("mode_free_flow_time", &Graph::mode_free_flow_time,
+             py::arg("edge_id"), py::arg("mode"), py::arg("walk_speed_ms") = 1.39f,
+             py::arg("bike_speed_ms") = 4.17f,
+             "Deterministic per-edge travel time [s] for a mode (car/transit: "
+             "edge's own free-flow speed; walk/bike: capped at the mode's own "
+             "pace) — walk/bike never experience congestion (no ped/bike "
+             "traffic model), so this IS their real travel time, not an "
+             "estimate. See include/nomad/core/graph.hpp for the exact formula.");
 
     // ── OsmLoader ─────────────────────────────────────────────────────────────
     py::class_<OsmLoader>(m, "OsmLoader")
@@ -295,6 +304,29 @@ PYBIND11_MODULE(_nomad_core, m) {
             py::arg("seed")         = 42);
 
     // ── Routing ───────────────────────────────────────────────────────────────
+    // RoutingRequest/Route: plain data structs (router.hpp). Bound so a route
+    // (and its total time) can be computed directly from Python WITHOUT
+    // running a full Simulation — the only viable way to get walk/bike
+    // per-edge timing cheaply, since those modes never reroute (no
+    // congestion feedback) and their pre-computed route IS their real path
+    // for the whole trip (see RouteStore in simulation.hpp: routes_ is
+    // populated once at generation and never cleared per-agent).
+    py::class_<RoutingRequest>(m, "RoutingRequest")
+        .def(py::init([](NodeId origin, NodeId destination, SimTime departure_time, AgentMode mode) {
+            return RoutingRequest{origin, destination, departure_time, mode};
+        }), py::arg("origin"), py::arg("destination"), py::arg("departure_time") = 0.0,
+            py::arg("mode") = AgentMode::Car)
+        .def_readwrite("origin", &RoutingRequest::origin)
+        .def_readwrite("destination", &RoutingRequest::destination)
+        .def_readwrite("departure_time", &RoutingRequest::departure_time)
+        .def_readwrite("mode", &RoutingRequest::mode);
+
+    py::class_<Route>(m, "Route")
+        .def_readonly("edges", &Route::edges)
+        .def_readonly("estimated_time_s", &Route::estimated_time_s)
+        .def_readonly("estimated_dist_m", &Route::estimated_dist_m)
+        .def_readonly("is_valid", &Route::is_valid);
+
     // Base class registered first (required for the unique_ptr<IRouter>
     // up-cast used by Simulation::set_router below). No constructor: IRouter
     // is abstract.
@@ -307,7 +339,10 @@ PYBIND11_MODULE(_nomad_core, m) {
     // py::class_<T, py::smart_holder>". Confirmed by trial: switching these
     // six classes to py::smart_holder is what made tests/python/
     // test_multimodal_bindings.py pass.
-    py::class_<IRouter, py::smart_holder>(m, "IRouter");
+    py::class_<IRouter, py::smart_holder>(m, "IRouter")
+        .def("route", &IRouter::route, py::arg("request"),
+             "Compute a single route (blocking, single-threaded query) — "
+             "works on both AStarRouter and CHRouter (CH ignores mode).");
 
     py::class_<AStarRouter, IRouter, py::smart_holder>(m, "AStarRouter")
         .def(py::init([](std::shared_ptr<Graph> g) {
