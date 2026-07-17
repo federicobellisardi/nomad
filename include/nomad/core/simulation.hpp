@@ -90,6 +90,16 @@ public:
     const Graph&         graph()        const;
     const ITrafficModel& traffic()      const;
 
+    // Read-only capability checks. compute_route() silently returns an empty
+    // route whenever router_ is null (see simulation.cpp), so a Simulation
+    // driven without ever calling set_router()/set_traffic_model() "runs"
+    // to completion without routing or moving a single agent instead of
+    // erroring. Added so callers (in particular the Python bindings) can
+    // fail loudly before run()/run_until()/step() instead of silently
+    // producing an empty result.
+    bool has_router()        const noexcept { return router_  != nullptr; }
+    bool has_traffic_model() const noexcept { return traffic_ != nullptr; }
+
 private:
     // ── Event handlers ────────────────────────────────────────────────────────
     void handle_event            (const Event& e);
