@@ -55,6 +55,19 @@ void AStarRouter::ThreadData::lazy_reset() {
     heap.clear();
 }
 
+float AStarRouter::edge_cost(EdgeId e, AgentMode mode) const {
+    if (mode == AgentMode::Car) {
+        float cost = (traffic_ && cfg_.use_traffic_costs)
+            ? traffic_->current_travel_time(e)
+            : graph_.free_flow_time(e);
+        if (cost <= 0.0f) cost = graph_.free_flow_time(e);
+        return cost;
+    }
+    // Walk/Bike/Transit/Idle: mode-capped free-flow only, never traffic-aware
+    // (no pedestrian/bike congestion model).
+    return graph_.mode_free_flow_time(e, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms);
+}
+
 // ── A* query ──────────────────────────────────────────────────────────────────
 Route AStarRouter::astar_query(NodeId origin, NodeId dest, AgentMode mode) const {
     const uint32_t N = graph_.num_nodes();
@@ -104,12 +117,7 @@ Route AStarRouter::astar_query(NodeId origin, NodeId dest, AgentMode mode) const
             if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), mode))
                 continue;
 
-            float cost = (traffic_ && cfg_.use_traffic_costs)
-                ? traffic_->current_travel_time(eid)
-                : graph_.free_flow_time(eid);
-            if (cost <= 0.0f) cost = graph_.free_flow_time(eid);
-
-            float g_v = g_u + cost;
+            float g_v = g_u + edge_cost(eid, mode);
             if (g_v < td.dist[v]) {
                 touch(v);
                 td.dist[v]      = g_v;
@@ -204,7 +212,7 @@ Route AStarRouter::route_perturbed(NodeId origin, NodeId dest, AgentMode mode,
 
             float mult = (ed.road_class < static_cast<uint8_t>(kNumRoadClasses))
                           ? class_mult[ed.road_class] : 1.0f;
-            float g_v = g_u + graph_.free_flow_time(eid) * mult;
+            float g_v = g_u + graph_.mode_free_flow_time(eid, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms) * mult;
 
             if (g_v < td.dist[v]) {
                 touch(v);
@@ -295,7 +303,7 @@ Route AStarRouter::route_stochastic(NodeId origin, NodeId dest, AgentMode mode,
             float noise = static_cast<float>(int32_t(h)) * (1.0f / 2147483648.0f);
             float mult  = 1.0f + sigma * noise;  // ≈ exp(sigma * noise) for sigma <= 0.15
 
-            float g_v = g_u + graph_.free_flow_time(eid) * mult;
+            float g_v = g_u + graph_.mode_free_flow_time(eid, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms) * mult;
             if (g_v < td.dist[v]) {
                 touch(v);
                 td.dist[v]      = g_v;

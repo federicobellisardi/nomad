@@ -35,8 +35,7 @@
   },
 
   "traffic": {
-    "model": "queue",
-    "ltm_time_step_s": 5.0
+    "model": "queue"
   },
 
   "demand": {

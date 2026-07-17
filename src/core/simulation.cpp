@@ -53,6 +53,11 @@ void Simulation::inject_demand() {
     if (!demand_) return;
     std::size_t n = demand_->generate(*graph_, eq_, cold_, routes_);
     hot_.resize(n);
+    // hot_.resize() defaults every agent to AgentMode::Car — copy the real
+    // per-agent mode from the demand plan so mode-gated logic downstream
+    // (traffic model interaction, mode-capped free-flow time) sees it.
+    for (AgentId a = 0; a < static_cast<AgentId>(n); ++a)
+        hot_.mode[a] = cold_.plans[a].preferred_mode;
     spdlog::info("Simulation: {} agents injected", n);
 
     if (!router_ || n == 0) return;
@@ -76,8 +81,12 @@ void Simulation::inject_demand() {
     const float sigma = cfg_.route_randomization_sigma;
     std::unique_ptr<AStarRouter> stoch_router;
     if (sigma > 0.0f) {
-        stoch_router = std::make_unique<AStarRouter>(
-            *graph_, nullptr, AStarRouter::Config{false, 33.3f});
+        AStarRouter::Config stoch_cfg;
+        stoch_cfg.use_traffic_costs = false;
+        stoch_cfg.max_speed_ms      = 33.3f;
+        stoch_cfg.walk_speed_ms     = cfg_.walk_speed_ms;
+        stoch_cfg.bike_speed_ms     = cfg_.bike_speed_ms;
+        stoch_router = std::make_unique<AStarRouter>(*graph_, nullptr, stoch_cfg);
         spdlog::info("Per-edge stochastic pre-routing enabled (sigma={:.2f})", sigma);
     }
 
@@ -160,10 +169,11 @@ void Simulation::inject_demand() {
         for (AgentId a = 0; a < static_cast<AgentId>(n); ++a) {
             auto edges = routes_.get_route(a);
             if (edges.empty()) continue;
+            AgentMode mode = hot_.mode[a];
             float tt = 0;
             for (EdgeId eid : edges) {
                 if (eid < graph_->num_edges())
-                    tt += graph_->free_flow_time(eid);
+                    tt += graph_->mode_free_flow_time(eid, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms);
             }
             hot_.freeflow_route_s[a] = tt;   // store for teleport
             SimTime t_dep = cold_.plans[a].activities[0].start_time;
@@ -246,8 +256,16 @@ void Simulation::handle_enter_link(const Event& e) {
     hot_.enter_time[a]   = e.time;
     hot_.state[a]        = AgentState::OnLink;
 
-    SimTime exit_time = e.time + graph_->free_flow_time(eid);
-    if (traffic_) exit_time = traffic_->on_enter(eid, a, e.time);
+    // Only Car agents interact with the (car-calibrated) traffic model —
+    // walk/bike travel free-flow at their own mode-capped speed, no
+    // congestion interaction (no pedestrian/bike congestion model exists).
+    SimTime exit_time;
+    if (traffic_ && hot_.mode[a] == AgentMode::Car) {
+        exit_time = traffic_->on_enter(eid, a, e.time);
+    } else {
+        exit_time = e.time + graph_->mode_free_flow_time(
+            eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
+    }
 
     hot_.scheduled_exit[a] = exit_time;
     eq_.push({exit_time, a, eid, EventType::AgentExitLink, {}});
@@ -270,7 +288,7 @@ void Simulation::handle_exit_link(const Event& e) {
     EdgeId   next  = (pos < route.size()) ? route[pos] : kInvalidEdge;
 
     bool can_exit = true;
-    if (traffic_) can_exit = traffic_->on_exit(eid, next, a, e.time);
+    if (traffic_ && hot_.mode[a] == AgentMode::Car) can_exit = traffic_->on_exit(eid, next, a, e.time);
 
     if (!can_exit) {
         eq_.push({e.time + 1.0, a, eid, EventType::AgentExitLink, {}});
@@ -328,7 +346,7 @@ void Simulation::handle_reroute(const Event& e) {
         float ff = 0;
         for (EdgeId eid : full)
             if (eid < graph_->num_edges())
-                ff += graph_->free_flow_time(eid);
+                ff += graph_->mode_free_flow_time(eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
         hot_.freeflow_route_s[a] = ff;
         ++hot_.reroute_count[a];
     }
@@ -371,7 +389,7 @@ void Simulation::teleport_stuck_agents(SimTime now) {
 
         // Teleport: remove from link, mark arrived
         EdgeId eid = hot_.current_edge[a];
-        if (eid < graph_->num_edges() && traffic_)
+        if (eid < graph_->num_edges() && traffic_ && hot_.mode[a] == AgentMode::Car)
             traffic_->force_remove(eid, a);
 
         uint32_t rc = std::min<uint32_t>(hot_.reroute_count[a], teleported_by_reroute_count_.size() - 1);
@@ -515,6 +533,8 @@ void Simulation::run_until(SimTime until) {
     if (!reroute_router_ && graph_ && traffic_) {
         AStarRouter::Config acfg;
         acfg.use_traffic_costs = true;
+        acfg.walk_speed_ms     = cfg_.walk_speed_ms;
+        acfg.bike_speed_ms     = cfg_.bike_speed_ms;
         reroute_router_ = std::make_unique<AStarRouter>(*graph_, traffic_.get(), acfg);
         spdlog::info("Reroute router: A* with traffic costs");
     }

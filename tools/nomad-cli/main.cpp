@@ -122,7 +122,10 @@ static int run_scenario(ScenarioConfig cfg) {
         ch->set_cache(cache.get());
         sim.set_router(std::move(ch));
     } else {
-        auto astar = std::make_unique<AStarRouter>(*graph);
+        AStarRouter::Config acfg;
+        acfg.walk_speed_ms = cfg.mode_choice.walk_speed_ms;
+        acfg.bike_speed_ms = cfg.mode_choice.bike_speed_ms;
+        auto astar = std::make_unique<AStarRouter>(*graph, nullptr, acfg);
         astar->set_cache(cache.get());
         sim.set_router(std::move(astar));
     }

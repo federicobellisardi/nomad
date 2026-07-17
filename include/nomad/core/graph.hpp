@@ -2,6 +2,7 @@
 
 #include <nomad/core/types.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -106,6 +107,25 @@ struct Graph {
 
     // Haversine distance between two nodes [meters] — used as A* heuristic
     float haversine(NodeId a, NodeId b) const noexcept;
+
+    // Mode-aware travel time for an edge [seconds]. Car/Transit/Idle use the
+    // edge's own (car-calibrated) free_flow_speed unchanged. Walk/Bike cap
+    // the effective speed at the mode's realistic max — most edges a
+    // pedestrian/cyclist is forced onto (no separate footway/cycleway mapped
+    // in OSM) carry a car-calibrated speed far above human pace; genuine
+    // footway/cycleway edges are already slower than the cap and pass
+    // through unaffected via min().
+    float mode_free_flow_time(EdgeId e, AgentMode mode,
+                               float walk_speed_ms, float bike_speed_ms) const noexcept {
+        const auto& ed = edges[e];
+        float speed = ed.free_flow_speed;
+        switch (mode) {
+        case AgentMode::Walk: speed = std::min(speed > 0.0f ? speed : walk_speed_ms, walk_speed_ms); break;
+        case AgentMode::Bike: speed = std::min(speed > 0.0f ? speed : bike_speed_ms, bike_speed_ms); break;
+        default: break;
+        }
+        return speed > 0.0f ? ed.length_m / speed : 1e9f;
+    }
 
     // Validate internal consistency (used in tests)
     bool validate() const;

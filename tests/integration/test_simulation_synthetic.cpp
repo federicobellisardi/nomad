@@ -222,3 +222,71 @@ TEST_CASE("Simulation: GeoJSON output is written", "[integration]") {
     fs::remove_all(out_dir);
     fs::remove(od_path);
 }
+
+// ── Multimodal: walk agents must not congest the shared car-calibrated link ──
+// 2-node graph, single directed edge, deliberately low capacity so a naive
+// (unfiltered) traffic-model interaction would push occupancy well past
+// storage_cap and inflate BPR travel time. If handle_enter_link/handle_exit_link
+// correctly gate traffic_->on_enter/on_exit to AgentMode::Car, the lone car
+// agent still gets its free-flow travel time regardless of how many walk
+// agents share the edge.
+static Graph make_single_edge_low_cap() {
+    Graph g;
+    g.nodes.resize(2);
+    g.nodes[0] = {0.0f, 0.0f, 0, 0, 0, 0};
+    g.nodes[1] = {1.0f, 0.0f, 0, 0, 0, 1};
+    g.row_ptr = {0, 1, 1};
+    g.col_idx = {0};
+    g.edges.resize(1);
+    EdgeData ed{};
+    ed.target          = 1;
+    ed.length_m        = 1000.0f;
+    ed.free_flow_speed = 10.0f;   // 100s free-flow
+    ed.capacity        = 200.0f;  // low capacity → low storage_cap
+    ed.road_class      = static_cast<uint8_t>(RoadClass::Residential);
+    g.edges[0] = ed;
+    g.geom_ptr.assign(2, 0);
+    return g;
+}
+
+TEST_CASE("Simulation: walk agents do not congest a shared car link", "[integration][multimodal]") {
+    namespace fs = std::filesystem;
+    auto graph = std::make_shared<Graph>(make_single_edge_low_cap());
+
+    SimulationConfig cfg;
+    cfg.start_time    = 0.0;
+    cfg.end_time      = 5000.0;
+    cfg.sync_window_s = 1.0f;
+    cfg.num_threads   = 1;
+
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    sim.set_traffic_model(std::make_unique<QueueTrafficModel>(*graph));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+
+    auto od_path = fs::temp_directory_path() / "nomad_test_od_multimodal.csv";
+    {
+        std::ofstream f(od_path);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        f << "0,1,1,car,0,1\n";
+        f << "0,1,30,walk,0,1\n";  // enough to blow past storage_cap if ungated
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(
+        OdMatrixDemand::from_csv(od_path)));
+
+    sim.run();
+
+    const auto& hot = sim.agent_hot();
+    bool found_car = false;
+    for (std::size_t a = 0; a < hot.size(); ++a) {
+        if (hot.mode[a] != AgentMode::Car) continue;
+        found_car = true;
+        float travel_s = static_cast<float>(hot.scheduled_exit[a] - hot.enter_time[a]);
+        // Free-flow is 100s; congested (30 walk agents wrongly counted) would
+        // be well over that (BPR caps at 3.4x = 340s for a fully-loaded link).
+        REQUIRE(travel_s < 150.0f);
+    }
+    REQUIRE(found_car);
+
+    fs::remove(od_path);
+}

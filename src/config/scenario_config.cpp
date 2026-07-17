@@ -170,6 +170,11 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         }
     }
 
+    // Cross-section: propagate mode speeds to simulation config (used to
+    // cap walk/bike edge travel time — see Graph::mode_free_flow_time).
+    cfg.simulation.walk_speed_ms = cfg.mode_choice.walk_speed_ms;
+    cfg.simulation.bike_speed_ms = cfg.mode_choice.bike_speed_ms;
+
     // ── output ───────────────────────────────────────────────────────────────
     if (j.contains("output")) {
         const auto& o = j["output"];

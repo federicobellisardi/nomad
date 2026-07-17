@@ -18,6 +18,10 @@ public:
     struct Config {
         bool   use_traffic_costs = true;
         float  max_speed_ms      = 33.3f;
+        // Mode-specific speed caps, applied via Graph::mode_free_flow_time.
+        // Defaults mirror ModeChoiceConfig (scenario_config.hpp).
+        float  walk_speed_ms     = 1.39f;   // 5 km/h
+        float  bike_speed_ms     = 4.17f;   // 15 km/h
     };
 
     // Two-arg form (convenience overload — default-constructs Config)
@@ -58,6 +62,11 @@ public:
 
 private:
     Route astar_query(NodeId origin, NodeId dest, AgentMode mode) const;
+
+    // Traffic-aware-or-free-flow cost for Car (existing behaviour); mode-capped
+    // free-flow cost for Walk/Bike (never traffic-aware — no ped/bike congestion
+    // model). Shared by astar_query / route_perturbed / route_stochastic.
+    float edge_cost(EdgeId e, AgentMode mode) const;
 
     struct alignas(64) ThreadData {
         std::vector<float>    dist;

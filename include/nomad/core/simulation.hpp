@@ -36,6 +36,8 @@ struct SimulationConfig {
     uint32_t max_reroutes               = 10;     // stop rerouting an agent after this many reroutes (0 = unlimited)
     float    stuck_max_hours            = 4.0f;   // hard cap: teleport after this many hours regardless of route length (0 = disabled)
     float    route_randomization_sigma  = 0.0f;   // logNormal sigma for stochastic pre-routing (0 = CH only)
+    float    walk_speed_ms       = 1.39f;  // propagated from ScenarioConfig::mode_choice
+    float    bike_speed_ms       = 4.17f;  // propagated from ScenarioConfig::mode_choice
     uint32_t num_threads         = 0;      // 0 = hardware_concurrency
     bool     store_traces        = false;
     std::string traffic_model    = "queue";

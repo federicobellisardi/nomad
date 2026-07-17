@@ -163,3 +163,44 @@ TEST_CASE("RouteCache: LRU eviction", "[routing][cache]") {
     cache.put(0, 4, AgentMode::Car, 0.0, r);  // evicts LRU (dest=1)
     REQUIRE(cache.size() == 3);
 }
+
+// ── Graph::mode_free_flow_time ────────────────────────────────────────────────
+TEST_CASE("Graph::mode_free_flow_time caps walk speed on a fast car edge", "[routing]") {
+    auto g = make_chain(5); // length=1000m, free_flow_speed=10m/s (car-fast)
+    float tt = g.mode_free_flow_time(0, AgentMode::Walk, 1.39f, 4.17f);
+    REQUIRE_THAT(tt, Catch::Matchers::WithinAbs(1000.0f / 1.39f, 0.5f));
+}
+
+TEST_CASE("Graph::mode_free_flow_time caps bike speed on a fast car edge", "[routing]") {
+    auto g = make_chain(5);
+    float tt = g.mode_free_flow_time(0, AgentMode::Bike, 1.39f, 4.17f);
+    REQUIRE_THAT(tt, Catch::Matchers::WithinAbs(1000.0f / 4.17f, 0.5f));
+}
+
+TEST_CASE("Graph::mode_free_flow_time leaves Car mode unaffected", "[routing]") {
+    auto g = make_chain(5);
+    float tt = g.mode_free_flow_time(0, AgentMode::Car, 1.39f, 4.17f);
+    REQUIRE_THAT(tt, Catch::Matchers::WithinAbs(g.free_flow_time(0), 0.01f));
+}
+
+TEST_CASE("Graph::mode_free_flow_time uses the edge's own speed when slower than the mode cap", "[routing]") {
+    // A genuinely slow footway (0.8 m/s) is slower than the walk cap (1.39 m/s) —
+    // min() must pick the edge's own speed, not artificially speed the agent up.
+    auto g = make_chain(5);
+    g.edges[0].free_flow_speed = 0.8f;
+    float tt = g.mode_free_flow_time(0, AgentMode::Walk, 1.39f, 4.17f);
+    REQUIRE_THAT(tt, Catch::Matchers::WithinAbs(1000.0f / 0.8f, 0.5f));
+}
+
+TEST_CASE("AStarRouter: Walk-mode route cost reflects walking pace, not car speed", "[routing]") {
+    auto g = make_chain(5); // 4 edges of 1000m @ 10m/s car speed
+    // make_chain defaults road_class to Motorway (0), which is not
+    // walk-accessible — retag as Residential so the route exists.
+    for (auto& ed : g.edges) ed.road_class = static_cast<uint8_t>(RoadClass::Residential);
+    AStarRouter router(g);
+    Route r = router.route(RoutingRequest{0, 4, 0.0, AgentMode::Walk});
+    REQUIRE(r.is_valid);
+    REQUIRE(r.edges.size() == 4);
+    // Car time would be 4*100=400s; walking should be far slower.
+    REQUIRE(r.estimated_time_s > 400.0f * 5.0f);
+}

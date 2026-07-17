@@ -205,6 +205,12 @@ def stream_viajes(viajes_files: list, cols: dict,
 
 CAR_MAX_ROAD_CLASS = 13   # RoadClass.Unclassified — cars cannot use Track or above
 
+# Excluded road classes per mode — mirrors road_class_accessible() in
+# include/nomad/core/types.hpp. RoadClass values: Motorway=0, MotorwayLink=1,
+# ..., Steps=18. Keep in sync if that enum changes.
+WALK_EXCLUDED_CLASSES = {0, 1}       # Motorway, MotorwayLink
+BIKE_EXCLUDED_CLASSES = {0, 1, 18}   # Motorway, MotorwayLink, Steps
+
 
 def _largest_scc(from_nodes: "np.ndarray", to_nodes: "np.ndarray") -> set:
     """Kosaraju's algorithm (iterative) — returns node set of the largest SCC."""
@@ -260,10 +266,21 @@ def _largest_scc(from_nodes: "np.ndarray", to_nodes: "np.ndarray") -> set:
 # Road-class accessibility per mode (mirrors C++ road_class_accessible in types.hpp)
 def mode_node_pool(mode: str,
                    all_pool: list,
-                   car_nodes: "set | None") -> list:
-    """Return the node pool appropriate for this transport mode."""
-    if mode == "car" and car_nodes is not None:
-        return [n for n in all_pool if n in car_nodes]
+                   car_nodes: "set | None",
+                   walk_nodes: "set | None" = None,
+                   bike_nodes: "set | None" = None) -> list:
+    """Return the node pool appropriate for this transport mode.
+
+    Restricting to each mode's own largest strongly-connected component
+    (car_nodes/walk_nodes/bike_nodes) guarantees every OD pair generated for
+    that mode is actually mutually reachable on the mode-filtered graph —
+    without this, a node that's only adjacent to Motorway edges (walk/bike-
+    inaccessible) or an isolated fragment can be picked as an origin/dest,
+    and AStarRouter will simply fail to find a route for that trip.
+    """
+    restrict = {"car": car_nodes, "walk": walk_nodes, "bike": bike_nodes}.get(mode)
+    if restrict is not None:
+        return [n for n in all_pool if n in restrict]
     return all_pool
 
 
@@ -274,6 +291,8 @@ def build_od_rows(od_fua: pd.DataFrame,
                   noise_sigma: float,
                   max_pairs: int = 20,
                   car_nodes: "set | None" = None,
+                  walk_nodes: "set | None" = None,
+                  bike_nodes: "set | None" = None,
                   scale: float = 1.0,
                   occupancy_factor: float = 1.0) -> pd.DataFrame:
     """Convert zone-level MITMA OD to node-level nomad OD rows.
@@ -340,8 +359,8 @@ def build_od_rows(od_fua: pd.DataFrame,
             if count < 1:
                 continue
 
-            orig_pool = mode_node_pool(mode, all_orig, car_nodes)
-            dest_pool = mode_node_pool(mode, all_dest, car_nodes)
+            orig_pool = mode_node_pool(mode, all_orig, car_nodes, walk_nodes, bike_nodes)
+            dest_pool = mode_node_pool(mode, all_dest, car_nodes, walk_nodes, bike_nodes)
             if not orig_pool or not dest_pool:
                 skipped += mode_trips
                 continue
@@ -421,18 +440,29 @@ def main() -> None:
     # eliminating routing failures from disconnected fragments (boundary clips,
     # mis-tagged private roads, one-way dead-ends).
     car_nodes: set | None = None
+    walk_nodes: set | None = None
+    bike_nodes: set | None = None
     edges_path = city_dir / "edges.parquet"
     if edges_path.exists():
         edges_df = pd.read_parquet(edges_path)
         if "road_class" in edges_df.columns and "from_node" in edges_df.columns:
-            car_edges = edges_df[edges_df["road_class"] <= CAR_MAX_ROAD_CLASS]
-            car_nodes = _largest_scc(car_edges["from_node"].to_numpy(),
-                                     car_edges["to_node"].to_numpy())
-            all_car = set(car_edges["from_node"]) | set(car_edges["to_node"])
-            print(f"Nodi car-accessibili: {len(all_car):,}  "
-                  f"SCC principale: {len(car_nodes):,} ({100*len(car_nodes)/len(all_car):.1f}%)")
+            def scc_nodes(label: str, sub_edges: pd.DataFrame) -> set:
+                nodes = _largest_scc(sub_edges["from_node"].to_numpy(),
+                                      sub_edges["to_node"].to_numpy())
+                all_nodes = set(sub_edges["from_node"]) | set(sub_edges["to_node"])
+                pct = 100 * len(nodes) / len(all_nodes) if all_nodes else 0.0
+                print(f"Nodi {label}-accessibili: {len(all_nodes):,}  "
+                      f"SCC principale: {len(nodes):,} ({pct:.1f}%)")
+                return nodes
+
+            car_edges  = edges_df[edges_df["road_class"] <= CAR_MAX_ROAD_CLASS]
+            walk_edges = edges_df[~edges_df["road_class"].isin(WALK_EXCLUDED_CLASSES)]
+            bike_edges = edges_df[~edges_df["road_class"].isin(BIKE_EXCLUDED_CLASSES)]
+            car_nodes  = scc_nodes("car",  car_edges)
+            walk_nodes = scc_nodes("walk", walk_edges)
+            bike_nodes = scc_nodes("bike", bike_edges)
     if car_nodes is None:
-        print("  ⚠ edges.parquet non trovato o senza road_class — uso tutti i nodi per car")
+        print("  ⚠ edges.parquet non trovato o senza road_class — uso tutti i nodi per ogni modo")
 
     # ── MITMA zones ──────────────────────────────────────────────────────────
     zone_cands = list(od_raw.glob("*.gpkg")) + list(od_raw.glob("*.shp"))
@@ -520,7 +550,8 @@ def main() -> None:
 
         print(f"  Generazione OD nomad …")
         od_nomad = build_od_rows(od_fua, zone_to_nodes, cols, rng, args.noise_sigma,
-                                 car_nodes=car_nodes, scale=args.scale,
+                                 car_nodes=car_nodes, walk_nodes=walk_nodes,
+                                 bike_nodes=bike_nodes, scale=args.scale,
                                  occupancy_factor=args.occupancy_factor)
         print(f"  righe: {len(od_nomad):,}   agenti: {od_nomad['count'].sum():,}")
 
