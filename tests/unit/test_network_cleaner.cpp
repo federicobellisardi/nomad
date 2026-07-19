@@ -99,3 +99,44 @@ TEST_CASE("NetworkCleaner: does not contract a real 3-way junction", "[network]"
     REQUIRE(out.num_nodes() == 4);
     REQUIRE(out.num_edges() == 3);
 }
+
+// Regression test for a real bug found running this on Barcelona's ~2M-node
+// graph: simplify_degree2_nodes could re-contract the same node an unbounded
+// number of times (worklist_size stabilized at 1 while the contracted
+// counter grew without bound -- confirmed via instrumentation, and by
+// running the actual Barcelona extract, which never terminated before the
+// fix and completes in ~1s after it). A node can structurally only be
+// contracted once (it has no valid edges left afterwards), so
+// nodes_simplified must never exceed nodes_before -- this is exactly the
+// invariant that was violated. Exercised here on a closed ring where every
+// edge is shorter than min_edge_length_m (forcing repeated Criterion-B
+// eligibility checks throughout the contraction, the code path involved),
+// large enough that the old unbounded-growth bug would not self-terminate
+// within any reasonable test timeout.
+TEST_CASE("NetworkCleaner: nodes_simplified never exceeds nodes_before (closed ring, short edges)", "[network]") {
+    const uint32_t N = 50;
+    Graph g;
+    g.nodes.resize(N);
+    g.row_ptr.resize(N + 1);
+    g.edges.resize(2 * N);
+    g.col_idx.resize(2 * N);
+    for (uint32_t i = 0; i < N; ++i) {
+        g.nodes[i] = {static_cast<float>(i), 0.0f, 0, 0, 0, i};
+        uint32_t next = (i + 1) % N;
+        uint32_t prev = (i + N - 1) % N;
+        g.row_ptr[i] = 2 * i;
+        g.edges[2 * i]     = make_edge(next, 5.0f);  // shorter than default min_edge_length_m (20m)
+        g.edges[2 * i + 1] = make_edge(prev, 5.0f);
+        g.col_idx[2 * i]     = 2 * i;
+        g.col_idx[2 * i + 1] = 2 * i + 1;
+    }
+    g.row_ptr[N] = 2 * N;
+    g.geom_ptr.assign(2 * N + 1, 0);
+
+    NetworkCleaner cleaner(permissive_cfg());
+    Graph out = cleaner.clean(std::move(g));
+
+    const auto& report = cleaner.last_report();
+    REQUIRE(report.nodes_simplified <= report.nodes_before);
+    REQUIRE(out.num_nodes() >= 1);
+}
