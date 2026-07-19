@@ -218,10 +218,24 @@ void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
     //              out-edges (see is_valid_pass_through below).
     // Criterion B: Simple type and at least one incident edge < min_edge_length_m
     //              and exactly 2 undirected neighbours (regardless of directed degree).
+    // A node that has already been contracted (absorbed into a redirected
+    // edge) must never be reconsidered -- see already_contracted below.
+    // FIX (fix/barcelona-network-cleaner-hang branch): without this guard,
+    // a small closed structure where contracting a node leaves its former
+    // neighbour(s) satisfying contractable() again in a way that keeps
+    // pointing back into the same already-absorbed node caused an infinite
+    // worklist churn on Barcelona's much larger/denser graph (confirmed via
+    // instrumentation: worklist_size stabilized at 1 while `contracted` grew
+    // without bound). Each node can structurally only be contracted once
+    // (it has no valid edges left afterwards), so this is a correctness
+    // fix, not a heuristic cutoff.
+    std::vector<bool> already_contracted(N, false);
+
     auto contractable = [&](NodeId u,
                              std::vector<EdgeId>& ins,
                              std::vector<EdgeId>& outs,
                              std::vector<NodeId>& nb) -> bool {
+        if (already_contracted[u]) return false;
         if (g.nodes[u].intersection_type != static_cast<uint8_t>(IntersectionType::Simple))
             return false;
         undir_nb(u, ins, outs, nb);
@@ -319,6 +333,7 @@ void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
         }
 
         ++contracted;
+        already_contracted[u] = true;
 
         // Neighbours may now satisfy the degree-2 criterion
         for (NodeId nb_node : {A, B}) {
