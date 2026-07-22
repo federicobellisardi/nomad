@@ -108,6 +108,7 @@ def detect_columns(sample_path: Path) -> dict:
         "trips":    pick("viajes", "trips")        or "viajes",
         "mode":     pick("modo", "mode", "medio"),
         "distance": pick("distancia", "distance"),
+        "km":       pick("viajes_km", "km"),
     }
 
 
@@ -137,6 +138,12 @@ def stream_viajes(viajes_files: list, cols: dict,
     Uses a dict accumulator (key → [sum, count]) instead of DataFrame merges
     to keep memory proportional to the number of unique OD pairs, not to
     the product of files × pairs.
+
+    If cols["km"] is available (MITMA's "viajes_km" field), it is also
+    averaged per key and returned as an extra column -- this lets a caller
+    compute a real per-row average trip distance (viajes_km/viajes) instead
+    of only having the coarse distance BAND, without changing behaviour for
+    any caller that doesn't need it.
     """
     COL_ORIG   = cols["orig"]
     COL_DEST   = cols["dest"]
@@ -144,13 +151,15 @@ def stream_viajes(viajes_files: list, cols: dict,
     COL_TRIPS  = cols["trips"]
     COL_MODE   = cols["mode"]
     COL_DIST   = cols["distance"]
+    COL_KM     = cols.get("km")
     group_cols = (
         [COL_ORIG, COL_DEST, COL_PERIOD]
         + ([COL_MODE] if COL_MODE else [])
         + ([COL_DIST] if COL_DIST else [])
     )
+    read_cols = group_cols + [COL_TRIPS] + ([COL_KM] if COL_KM else [])
 
-    # key → [trips_sum, days_seen]
+    # key → [trips_sum, days_seen] or [trips_sum, days_seen, km_sum] if COL_KM
     acc: dict = {}
     n_used = 0
 
@@ -166,18 +175,25 @@ def stream_viajes(viajes_files: list, cols: dict,
         df = pd.read_csv(fpath, sep="|",
                          compression="gzip" if gz else None,
                          dtype={COL_ORIG: str, COL_DEST: str},
-                         usecols=group_cols + [COL_TRIPS])
+                         usecols=read_cols)
         df = df[df[COL_ORIG].isin(fua_zone_ids) & df[COL_DEST].isin(fua_zone_ids)]
         df[COL_PERIOD] = pd.to_numeric(df[COL_PERIOD], errors="coerce")
         df[COL_TRIPS]  = pd.to_numeric(df[COL_TRIPS],  errors="coerce").fillna(0)
+        if COL_KM:
+            df[COL_KM] = pd.to_numeric(df[COL_KM], errors="coerce").fillna(0)
 
-        day_sum = df.groupby(group_cols)[COL_TRIPS].sum()
-        for key, val in day_sum.items():
+        agg_cols = [COL_TRIPS] + ([COL_KM] if COL_KM else [])
+        day_sum = df.groupby(group_cols)[agg_cols].sum()
+        for key, row in day_sum.iterrows():
+            trips_val = row[COL_TRIPS]
+            km_val = row[COL_KM] if COL_KM else None
             if key in acc:
-                acc[key][0] += val
+                acc[key][0] += trips_val
                 acc[key][1] += 1
+                if COL_KM:
+                    acc[key][2] += km_val
             else:
-                acc[key] = [val, 1]
+                acc[key] = [trips_val, 1] + ([km_val] if COL_KM else [])
 
         n_used += 1
         print(f"  [{n_used}] {fpath.name}", end="\r")
@@ -195,10 +211,15 @@ def stream_viajes(viajes_files: list, cols: dict,
 
     rows = {col: [] for col in group_cols}
     rows[COL_TRIPS] = []
-    for key, (s, c) in zip(keys, acc.values()):
+    if COL_KM:
+        rows[COL_KM] = []
+    for key, vals in zip(keys, acc.values()):
         for col, val in zip(group_cols, key):
             rows[col].append(val)
+        s, c = vals[0], vals[1]
         rows[COL_TRIPS].append(s / c)
+        if COL_KM:
+            rows[COL_KM].append(vals[2] / c)
 
     return pd.DataFrame(rows)
 
@@ -284,6 +305,14 @@ def mode_node_pool(mode: str,
     return all_pool
 
 
+#: banda -> distanza rappresentativa (km), usata SOLO come fallback quando
+#: viajes_km non e' disponibile per una riga -- il caso normale usa invece
+#: la distanza media reale (viajes_km/viajes) di quella riga specifica.
+DISTANCE_BAND_FALLBACK_KM: dict[str, float] = {
+    "0.5-2": 1.25, "2-10": 6.0, "10-50": 30.0, ">50": 70.0,
+}
+
+
 def build_od_rows(od_fua: pd.DataFrame,
                   zone_to_nodes: dict,
                   cols: dict,
@@ -294,12 +323,23 @@ def build_od_rows(od_fua: pd.DataFrame,
                   walk_nodes: "set | None" = None,
                   bike_nodes: "set | None" = None,
                   scale: float = 1.0,
-                  occupancy_factor: float = 1.0) -> pd.DataFrame:
+                  occupancy_factor: float = 1.0,
+                  mode_choice_fn=None) -> pd.DataFrame:
     """Convert zone-level MITMA OD to node-level nomad OD rows.
 
     occupancy_factor: average persons per car trip.  Divides car person-trips
     to obtain vehicle-trips (e.g. 1.20 for Spain average).  Set to 1.0 to
     keep raw person-trips as vehicle-trips.
+
+    mode_choice_fn: optional callable(distance_km: float) -> dict with keys
+    "car"/"walk"/"bike" (fractions of the non-transit, non-other subset,
+    summing to 1.0). When given (and a distance band column exists), this
+    REPLACES the car/walk/bike split from DISTANCE_MODE_FRACTIONS for that
+    row -- the "transit" fraction from DISTANCE_MODE_FRACTIONS is kept
+    unchanged (this function has no data source for transit's own share),
+    and car/walk/bike are rescaled to fill the remaining (1 - transit) mass.
+    Backward compatible: if None (default), behaviour is byte-for-byte
+    identical to before this parameter existed.
     """
     COL_ORIG   = cols["orig"]
     COL_DEST   = cols["dest"]
@@ -307,6 +347,7 @@ def build_od_rows(od_fua: pd.DataFrame,
     COL_TRIPS  = cols["trips"]
     COL_MODE   = cols["mode"]
     COL_DIST   = cols["distance"]
+    COL_KM     = cols.get("km")
 
     rows = []
     skipped = 0.0
@@ -333,6 +374,19 @@ def build_od_rows(od_fua: pd.DataFrame,
             mode_fracs = DISTANCE_MODE_FRACTIONS.get(str(r[COL_DIST]),
                                                       {"car": 0.5, "walk": 0.3,
                                                        "bike": 0.1, "transit": 0.1})
+            if mode_choice_fn is not None:
+                transit_frac = mode_fracs.get("transit", 0.0)
+                km_val = r[COL_KM] if COL_KM else None
+                trips_val = r[COL_TRIPS]
+                dist_km = (km_val / trips_val if km_val and trips_val and km_val > 0 and trips_val > 0
+                           else DISTANCE_BAND_FALLBACK_KM.get(str(r[COL_DIST])))
+                if dist_km is not None and dist_km > 0:
+                    cwb = mode_choice_fn(dist_km)
+                    mode_fracs = {mode: p * (1.0 - transit_frac) for mode, p in cwb.items()}
+                    mode_fracs["transit"] = transit_frac
+                # se dist_km non calcolabile (riga senza banda riconosciuta e
+                # senza viajes_km), resta il fallback DISTANCE_MODE_FRACTIONS
+                # gia' assegnato sopra -- non silenziosamente 0 o inventato.
         else:
             mode_fracs = {"car": 1.0}
 
