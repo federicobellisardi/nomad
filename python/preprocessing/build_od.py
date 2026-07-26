@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import datetime as dt
+import inspect
 import os
 import re
 import sys
@@ -340,6 +341,13 @@ def build_od_rows(od_fua: pd.DataFrame,
     and car/walk/bike are rescaled to fill the remaining (1 - transit) mass.
     Backward compatible: if None (default), behaviour is byte-for-byte
     identical to before this parameter existed.
+
+    If mode_choice_fn declares a `period` parameter (checked once via
+    inspect.signature, not per-row), it is also called as
+    mode_choice_fn(distance_km, period=<MITMA hour 0-23>) -- lets a caller
+    apply time-of-day-dependent behaviour (e.g. a peak-hour congestion
+    adjustment) without breaking callers whose mode_choice_fn only takes
+    distance_km.
     """
     COL_ORIG   = cols["orig"]
     COL_DEST   = cols["dest"]
@@ -348,6 +356,13 @@ def build_od_rows(od_fua: pd.DataFrame,
     COL_MODE   = cols["mode"]
     COL_DIST   = cols["distance"]
     COL_KM     = cols.get("km")
+
+    mode_choice_fn_accepts_period = False
+    if mode_choice_fn is not None:
+        try:
+            mode_choice_fn_accepts_period = "period" in inspect.signature(mode_choice_fn).parameters
+        except (TypeError, ValueError):
+            mode_choice_fn_accepts_period = False
 
     rows = []
     skipped = 0.0
@@ -381,7 +396,10 @@ def build_od_rows(od_fua: pd.DataFrame,
                 dist_km = (km_val / trips_val if km_val and trips_val and km_val > 0 and trips_val > 0
                            else DISTANCE_BAND_FALLBACK_KM.get(str(r[COL_DIST])))
                 if dist_km is not None and dist_km > 0:
-                    cwb = mode_choice_fn(dist_km)
+                    if mode_choice_fn_accepts_period:
+                        cwb = mode_choice_fn(dist_km, period=int(r[COL_PERIOD]))
+                    else:
+                        cwb = mode_choice_fn(dist_km)
                     mode_fracs = {mode: p * (1.0 - transit_frac) for mode, p in cwb.items()}
                     mode_fracs["transit"] = transit_frac
                 # se dist_km non calcolabile (riga senza banda riconosciuta e

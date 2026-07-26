@@ -132,6 +132,39 @@ class TestModeChoiceHook:
                      occupancy_factor=1.2, mode_choice_fn=fake_model)
         assert seen_distances == [DISTANCE_BAND_FALLBACK_KM["10-50"]]
 
+    def test_period_passed_when_mode_choice_fn_declares_it(self):
+        """If mode_choice_fn's signature has a `period` parameter,
+        build_od_rows must call it with period=<MITMA hour from the row> --
+        lets a caller apply time-of-day-dependent adjustments (e.g. a
+        peak-hour congestion bonus) without a separate code path."""
+        od_fua = _base_od_fua(distancia="2-10", viajes_km=400.0)
+        cols = _cols(with_km=True)
+        seen_periods = []
+
+        def fake_model(distance_km, period=None):
+            seen_periods.append(period)
+            return {"car": 1.0, "walk": 0.0, "bike": 0.0}
+
+        rng = np.random.default_rng(42)
+        build_od_rows(od_fua, _zone_to_nodes(), cols, rng, noise_sigma=0.0,
+                     occupancy_factor=1.2, mode_choice_fn=fake_model)
+        assert seen_periods == [8]  # "periodo": 8 in _base_od_fua
+
+    def test_mode_choice_fn_without_period_param_still_works(self):
+        """A mode_choice_fn with the pre-existing single-arg signature (no
+        `period`) must keep working unchanged -- inspect.signature() must
+        not force a period kwarg onto callers that never declared one."""
+        od_fua = _base_od_fua(distancia="2-10", viajes_km=400.0)
+        cols = _cols(with_km=True)
+
+        def fake_model(distance_km):
+            return {"car": 1.0, "walk": 0.0, "bike": 0.0}
+
+        rng = np.random.default_rng(42)
+        result = build_od_rows(od_fua, _zone_to_nodes(), cols, rng, noise_sigma=0.0,
+                               occupancy_factor=1.2, mode_choice_fn=fake_model)
+        assert result["count"].sum() > 0
+
     def test_mode_choice_fn_output_still_sums_with_transit_to_one(self):
         od_fua = _base_od_fua(distancia="0.5-2", viajes_km=125.0)  # avg 1.25 km/trip
         cols = _cols(with_km=True)
