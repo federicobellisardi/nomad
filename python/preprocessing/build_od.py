@@ -450,7 +450,12 @@ def build_od_rows(od_fua: pd.DataFrame,
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main(argv=None, mode_choice_fn=None) -> None:
+    """argv: lista di argomenti CLI espliciti (None = usa sys.argv, come
+    prima). mode_choice_fn: passato a build_od_rows() (vedi la sua
+    docstring) -- None per default, comportamento identico a prima.
+    Entrambi permettono a un chiamante Python di invocare questa funzione
+    direttamente (import, non subprocess) senza toccare sys.argv."""
     parser = argparse.ArgumentParser(description="Genera matrici OD nomad da dati MITMA")
     parser.add_argument("--city", required=True,
                         help="Nome città (es. 'Palma de Mallorca')")
@@ -465,7 +470,13 @@ def main() -> None:
     parser.add_argument("--occupancy-factor", type=float, default=1.20,
                         help="Persone per viaggio in auto (default: 1.20, media Spagna). "
                              "Converte person-trips MITMA → vehicle-trips. Usa 1.0 per disabilitare.")
-    args = parser.parse_args()
+    parser.add_argument("--months", default=None,
+                        help="Sottocartelle di YYYY-MM in data_dir/od_raw da usare (comma-separated, "
+                             "es. '2022-02'). Default: TUTTE quelle trovate in od_raw -- ATTENZIONE, "
+                             "se sono presenti piu' mesi scaricati (es. per citta' diverse), il default "
+                             "li mischia tutti insieme silenziosamente. Specificare sempre esplicitamente "
+                             "quando od_raw puo' contenere piu' di un mese.")
+    args = parser.parse_args(argv)
 
     data_dir  = Path(args.data_dir)
     city_slug = slugify(args.city)
@@ -542,10 +553,25 @@ def main() -> None:
     print(f"  {len(joined):,} nodi nella FUA  |  {len(zone_to_nodes)} distretti con nodi")
 
     # ── Viajes files + festivi ────────────────────────────────────────────────
-    viajes_files = (sorted(od_raw.glob("**/*iajes*.csv.gz")) +
-                    sorted(od_raw.glob("**/*iajes*.csv")))
+    if args.months:
+        month_dirs = [od_raw / m.strip() for m in args.months.split(",")]
+        missing = [d for d in month_dirs if not d.is_dir()]
+        if missing:
+            raise SystemExit(f"cartelle mese non trovate: {missing}")
+        viajes_files = sorted(
+            [f for d in month_dirs for f in d.glob("*iajes*.csv.gz")] +
+            [f for d in month_dirs for f in d.glob("*iajes*.csv")]
+        )
+    else:
+        all_month_dirs = sorted(p.name for p in od_raw.iterdir() if p.is_dir() and p.name[:1].isdigit())
+        if len(all_month_dirs) > 1:
+            print(f"  ATTENZIONE: {len(all_month_dirs)} mesi trovati in {od_raw} ({all_month_dirs}) "
+                  "e --months non specificato -- verranno usati TUTTI insieme, mischiati. "
+                  "Specificare --months per selezionarne uno solo.")
+        viajes_files = (sorted(od_raw.glob("**/*iajes*.csv.gz")) +
+                        sorted(od_raw.glob("**/*iajes*.csv")))
     if not viajes_files:
-        raise SystemExit(f"Nessun file viajes in {od_raw}")
+        raise SystemExit(f"Nessun file viajes in {od_raw}" + (f" per i mesi {args.months}" if args.months else ""))
 
     cols = detect_columns(viajes_files[0])
     print(f"Colonne MITMA: {cols}")
@@ -606,7 +632,8 @@ def main() -> None:
         od_nomad = build_od_rows(od_fua, zone_to_nodes, cols, rng, args.noise_sigma,
                                  car_nodes=car_nodes, walk_nodes=walk_nodes,
                                  bike_nodes=bike_nodes, scale=args.scale,
-                                 occupancy_factor=args.occupancy_factor)
+                                 occupancy_factor=args.occupancy_factor,
+                                 mode_choice_fn=mode_choice_fn)
         print(f"  righe: {len(od_nomad):,}   agenti: {od_nomad['count'].sum():,}")
 
         od_path = city_dir / f"od_{city_slug}_{label}.csv"
