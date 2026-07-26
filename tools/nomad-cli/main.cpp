@@ -94,7 +94,10 @@ static int run_scenario(ScenarioConfig cfg) {
 
     // ── Traffic model ─────────────────────────────────────────────────────────
     if (cfg.traffic.model == "ltm") {
-        sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph));
+        LtmTrafficModel::Config ltm_cfg;
+        ltm_cfg.enable_discharge_cap = cfg.traffic.ltm_discharge_cap;
+        ltm_cfg.discharge_burst_s    = cfg.traffic.ltm_discharge_burst_s;
+        sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, ltm_cfg));
     } else {
         sim.set_traffic_model(std::make_unique<QueueTrafficModel>(*graph));
     }

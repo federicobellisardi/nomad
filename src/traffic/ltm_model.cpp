@@ -27,6 +27,12 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
         float eff_len = std::max(50.0f, ed.length_m);
         cells_[e].storage_veh    = eff_len * estimated_lanes * cfg_.jam_density_vpm;
         cells_[e].capacity_veh_s = ed.capacity / 3600.0f;
+        if (cfg_.enable_discharge_cap) {
+            // Bucket starts FULL: an idle/lightly-used link must never be
+            // artificially throttled from the very first exit.
+            cells_[e].discharge_credit = std::max(
+                1.0f, cells_[e].capacity_veh_s * cfg_.discharge_burst_s);
+        }
         states_[e].travel_time_s.store(graph.free_flow_time(e), std::memory_order_relaxed);
     }
 }
@@ -60,28 +66,43 @@ SimTime LtmTrafficModel::on_enter(EdgeId e, AgentId /*a*/, SimTime t) {
     return t + tt;
 }
 
+bool LtmTrafficModel::has_capacity(EdgeId e) const {
+    if (e >= graph_.num_edges()) return true;
+    const Cell& c = cells_[e];
+    return c.storage_veh - static_cast<float>(c.occupancy) > 0.0f;
+}
+
 bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId /*a*/, SimTime t) {
     if (e >= graph_.num_edges()) return true;
     Cell& c = cells_[e];
 
-    // Receiving-side spillback only: block if the downstream link has no
-    // spare storage. This is the behaviour QueueTrafficModel does not have —
-    // it lets congestion genuinely propagate backward instead of only
-    // raising the current link's own travel time.
-    //
-    // Deliberately NOT also enforcing a per-link discharge headway here:
-    // combined with per-link storage caps (which are already small — a
-    // 50m/~7-vehicle floor — on the many short residential/service edges
-    // typical of a real OSM network) a headway gate compounds into
-    // near-total gridlock even at low demand (see Palma validation run:
-    // natural arrivals collapsed from 133k to 4.4k agents at demand
-    // scale=0.4). Storage-based spillback alone already caps effective
-    // throughput realistically without that extra, redundant constraint.
-    if (next != kInvalidEdge && next < graph_.num_edges()) {
-        const Cell& nc = cells_[next];
-        float receiving = nc.storage_veh - static_cast<float>(nc.occupancy);
-        if (receiving <= 0.0f)
-            return false;
+    // Discharge-rate token bucket (opt-in, see class-level comment in the
+    // header for why this is a bucket and not a rigid headway). Refilled
+    // UNCONDITIONALLY here, before either gate below is checked, so a link
+    // stalled by spillback on `next` isn't ALSO punished with a starved
+    // bucket once spillback clears -- the two gates are independent.
+    if (cfg_.enable_discharge_cap) {
+        double dt = std::max(0.0, t - c.last_credit_update);
+        float max_credit = std::max(1.0f, c.capacity_veh_s * cfg_.discharge_burst_s);
+        c.discharge_credit = std::min(
+            max_credit, c.discharge_credit + c.capacity_veh_s * static_cast<float>(dt));
+        c.last_credit_update = t;
+    }
+
+    // Receiving-side spillback: block if the downstream link has no spare
+    // storage. This is the behaviour QueueTrafficModel does not have — it
+    // lets congestion genuinely propagate backward instead of only raising
+    // the current link's own travel time.
+    if (next != kInvalidEdge && next < graph_.num_edges() && !has_capacity(next))
+        return false;
+
+    // Sending-side discharge-rate cap (opt-in). A rigid per-exit headway
+    // here was tried once and caused near-total gridlock (see header
+    // comment) -- this bucket only blocks once a SUSTAINED burst exceeds
+    // discharge_burst_s worth of capacity, not on isolated exits.
+    if (cfg_.enable_discharge_cap) {
+        if (c.discharge_credit < 1.0f) return false;
+        c.discharge_credit -= 1.0f;
     }
 
     if (c.occupancy > 0) --c.occupancy;

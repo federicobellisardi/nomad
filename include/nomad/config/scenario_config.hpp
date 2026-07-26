@@ -48,6 +48,12 @@ struct RoutingConfig {
 
 struct TrafficConfig {
     std::string model = "queue";     // "queue" | "ltm"
+
+    // LtmTrafficModel-only discharge-rate cap (token bucket, see
+    // LtmTrafficModel::Config in include/nomad/traffic/ltm_model.hpp for the
+    // full rationale). Ignored when model != "ltm". Default OFF.
+    bool  ltm_discharge_cap     = false;
+    float ltm_discharge_burst_s = 10.0f;
 };
 
 struct DemandConfig {

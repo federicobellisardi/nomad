@@ -103,6 +103,16 @@ public:
     // teleport mechanism to clear agents that have exceeded their time budget.
     virtual void force_remove(EdgeId e, AgentId a) { (void)e; (void)a; }
 
+    // Returns true if edge `e` currently has spare storage for a new entrant.
+    // Used only by Simulation::handle_depart() to gate a trip's *first* edge:
+    // there is no preceding on_exit() call for a trip origin (no "previous"
+    // edge), so on_enter() would otherwise be reachable with unbounded
+    // occupancy. Every subsequent edge transition is already gated by
+    // on_exit()'s spillback check on `next` before handle_exit_link() pushes
+    // the corresponding AgentEnterLink event. Default true: models without a
+    // storage/spillback concept (QueueTrafficModel) accept unconditionally.
+    virtual bool has_capacity(EdgeId e) const { (void)e; return true; }
+
     virtual std::string_view model_name() const = 0;
 };
 

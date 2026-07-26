@@ -6,6 +6,7 @@
 #include <nomad/demand/od_matrix.hpp>
 #include <nomad/routing/astar_router.hpp>
 #include <nomad/traffic/queue_model.hpp>
+#include <nomad/traffic/ltm_model.hpp>
 #include <nomad/output/geojson_writer.hpp>
 
 #include <filesystem>
@@ -287,6 +288,184 @@ TEST_CASE("Simulation: walk agents do not congest a shared car link", "[integrat
         REQUIRE(travel_s < 150.0f);
     }
     REQUIRE(found_car);
+
+    fs::remove(od_path);
+}
+
+// ── Single edge with small storage_veh, for the departure-gate test below ────
+static Graph make_small_storage_edge() {
+    Graph g;
+    g.nodes.resize(2);
+    g.nodes[0] = {0.0f, 0.0f, 0, 0, 0, 0};
+    g.nodes[1] = {1.0f, 0.0f, 0, 0, 0, 1};
+    g.row_ptr = {0, 1, 1};
+    g.col_idx = {0};
+    g.edges.resize(1);
+    EdgeData ed{};
+    ed.target          = 1;
+    ed.length_m        = 50.0f;   // effective-length floor itself
+    ed.free_flow_speed = 10.0f;   // 5s free-flow
+    ed.capacity        = 100.0f;  // 1 lane -> storage_veh = 50*1*(1/7.5) ≈ 6.67
+    ed.road_class      = static_cast<uint8_t>(RoadClass::Primary);
+    g.edges[0] = ed;
+    g.geom_ptr.assign(2, 0);
+    return g;
+}
+
+TEST_CASE("Simulation: LTM departure gate keeps origin-edge occupancy within storage_veh",
+          "[integration]") {
+    namespace fs = std::filesystem;
+    auto graph = std::make_shared<Graph>(make_small_storage_edge());
+
+    SimulationConfig cfg;
+    cfg.start_time    = 900.0;
+    cfg.end_time      = 1200.0;
+    cfg.sync_window_s = 1.0f;
+    cfg.num_threads   = 1;
+    // Isolate the departure gate: disable stuck-agent teleportation so it
+    // can't confound the occupancy trace with an unrelated mechanism.
+    cfg.stuck_threshold_ratio = 0.0f;
+    cfg.stuck_max_hours       = 0.0f;
+
+    auto traffic = std::make_unique<LtmTrafficModel>(*graph);
+    auto* traffic_ptr = traffic.get();
+
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    sim.set_traffic_model(std::move(traffic));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+
+    auto od_path = fs::temp_directory_path() / "nomad_test_od_departure_gate.csv";
+    {
+        std::ofstream f(od_path);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        // 40 agents clustered in a ~12s window onto an edge whose free-flow
+        // transit time is only 5s -- before the departure-gate fix, all of
+        // them enter unconditionally via handle_depart(), pushing occupancy
+        // far past storage_veh (≈6.67). After the fix, has_capacity() defers
+        // departures 1s at a time until the edge drains.
+        f << "0,1,40,car,1000,2\n";
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(
+        OdMatrixDemand::from_csv(od_path)));
+
+    float max_occupancy = 0.0f;
+    sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
+        if (static_cast<EdgeId>(e.payload) != 0) return;
+        max_occupancy = std::max(max_occupancy,
+                                  traffic_ptr->link_states()[0].occupancy.load());
+    });
+
+    sim.run();
+
+    REQUIRE(max_occupancy <= 7.0f);  // storage_veh ≈ 6.67 -> 7 agents saturate it
+                                      // (same threshold as the LTM unit tests above)
+
+    fs::remove(od_path);
+}
+
+// ── N single-hop upstream edges converging on one shared downstream edge ────
+// (nodes 0..n_upstream-1) --edge i--> (node "middle") --shared edge--> (node "final")
+static Graph make_converging_star(int n_upstream) {
+    int middle = n_upstream;
+    int final_node = n_upstream + 1;
+    int N = n_upstream + 2;
+
+    struct RawEdge { int u, v; };
+    std::vector<RawEdge> raw;
+    for (int i = 0; i < n_upstream; ++i) raw.push_back({i, middle});
+    raw.push_back({middle, final_node});  // the shared chokepoint, last in raw order
+
+    Graph g;
+    g.nodes.resize(N);
+    for (int i = 0; i < N; ++i)
+        g.nodes[i] = {static_cast<float>(i) * 0.001f, 0.0f, 0, 0, 0, static_cast<uint32_t>(i)};
+
+    std::vector<int> out_degree(N, 0);
+    for (auto& e : raw) ++out_degree[e.u];
+    g.row_ptr.assign(N + 1, 0);
+    for (int i = 0; i < N; ++i) g.row_ptr[i + 1] = g.row_ptr[i] + out_degree[i];
+
+    uint32_t E = static_cast<uint32_t>(raw.size());
+    g.edges.resize(E);
+    g.col_idx.resize(E);
+    std::vector<uint32_t> fill(g.row_ptr.begin(), g.row_ptr.begin() + N);
+    for (uint32_t eid = 0; eid < E; ++eid) {
+        auto& re = raw[eid];
+        uint32_t pos = fill[re.u]++;
+        g.col_idx[pos] = eid;
+        EdgeData ed{};
+        ed.target = static_cast<NodeId>(re.v);
+        ed.road_class = static_cast<uint8_t>(RoadClass::Primary);
+        if (re.u == middle) {
+            // The shared downstream chokepoint: same small storage_veh as
+            // make_small_storage_edge (≈6.67) so n_upstream agents arriving
+            // at once genuinely contend for it.
+            ed.length_m = 50.0f;
+            ed.free_flow_speed = 10.0f;
+            ed.capacity = 100.0f;
+        } else {
+            // Upstream edges: generous capacity (only 1 agent each), but the
+            // SAME 10s free-flow time so all n_upstream agents reach `middle`
+            // and attempt to exit onto the shared edge in the same instant.
+            ed.length_m = 100.0f;
+            ed.free_flow_speed = 10.0f;
+            ed.capacity = 1600.0f;
+        }
+        g.edges[eid] = ed;
+    }
+    g.geom_ptr.assign(E + 1, 0);
+    return g;
+}
+
+TEST_CASE("Simulation: exit-link gate keeps shared downstream edge within storage_veh "
+          "when multiple upstream agents converge simultaneously", "[integration]") {
+    namespace fs = std::filesystem;
+    const int n_upstream = 10;
+    auto graph = std::make_shared<Graph>(make_converging_star(n_upstream));
+    const EdgeId shared_edge = static_cast<EdgeId>(n_upstream);  // last edge built above
+
+    SimulationConfig cfg;
+    cfg.start_time    = 0.0;
+    cfg.end_time      = 60.0;
+    cfg.sync_window_s = 30.0f;  // one 10-agent origin edge each, all converging within
+                                // this single batch is exactly the scenario that broke
+                                // has_capacity() before enter_edge_now() was synchronous.
+    cfg.num_threads   = 1;
+    cfg.stuck_threshold_ratio = 0.0f;  // isolate the gate, see the departure-gate test above
+    cfg.stuck_max_hours       = 0.0f;
+
+    auto traffic = std::make_unique<LtmTrafficModel>(*graph);
+    auto* traffic_ptr = traffic.get();
+
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    sim.set_traffic_model(std::move(traffic));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+
+    auto od_path = fs::temp_directory_path() / "nomad_test_od_converging_star.csv";
+    {
+        std::ofstream f(od_path);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        // One agent per distinct origin node, all departing in [0,1) -- each
+        // takes the SAME 10s free-flow hop, so all n_upstream agents try to
+        // exit onto the shared edge within the same ~10-11s instant.
+        for (int i = 0; i < n_upstream; ++i)
+            f << i << "," << (n_upstream + 1) << ",1,car,0,1\n";
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(
+        OdMatrixDemand::from_csv(od_path)));
+
+    float max_occupancy = 0.0f;
+    sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
+        if (static_cast<EdgeId>(e.payload) != shared_edge) return;
+        max_occupancy = std::max(max_occupancy,
+                                  traffic_ptr->link_states()[shared_edge].occupancy.load());
+    });
+
+    sim.run();
+
+    REQUIRE(max_occupancy <= 7.0f);  // storage_veh ≈ 6.67 on the shared edge
 
     fs::remove(od_path);
 }

@@ -94,7 +94,17 @@ private:
     // ── Event handlers ────────────────────────────────────────────────────────
     void handle_event            (const Event& e);
     void handle_depart           (const Event& e);
-    void handle_enter_link       (const Event& e);
+    // Shared mechanics of "agent a enters edge eid at time t": updates
+    // current_edge/enter_time/state, calls traffic_->on_enter (car) or
+    // computes free-flow time (other modes), schedules AgentExitLink.
+    // Called SYNCHRONOUSLY (not via a queued AgentEnterLink event) from both
+    // handle_depart() and handle_exit_link() -- deferring entry via the event
+    // queue let several agents converging on the same edge within one
+    // drain_until() batch all see stale (pre-increment) occupancy and all
+    // pass a capacity/spillback check meant to admit only one of them. Does
+    // NOT touch n_enter_/fire_hooks itself -- both callers do that manually
+    // (EventType::AgentEnterLink is no longer ever pushed as a real event).
+    void enter_edge_now          (AgentId a, EdgeId eid, SimTime t);
     void handle_exit_link        (const Event& e);
     void handle_arrive_activity  (const Event& e);
     void handle_reroute          (const Event& e);
@@ -129,6 +139,10 @@ private:
     std::atomic<std::size_t> events_processed_{0};
     std::atomic<uint64_t>    n_depart_{0}, n_enter_{0}, n_exit_{0}, n_arrive_{0};
     std::atomic<uint64_t>    n_teleported_{0};
+    // Departures deferred 1s because their first edge had no spare storage
+    // (LtmTrafficModel::has_capacity() — see traffic_model.hpp). Distinguishes
+    // "the gate is working as intended" from a runaway rejection loop.
+    std::atomic<uint64_t>    n_depart_rejected_{0};
 
     // Diagnostics: reroute_count / road_class of every agent at the moment it
     // is teleported (captured in teleport_stuck_agents before state is

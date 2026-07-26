@@ -176,6 +176,98 @@ TEST_CASE("LtmModel: next == kInvalidEdge (trip end) always allows exit", "[traf
     REQUIRE(model.on_exit(1, kInvalidEdge, 0, 100.0));
 }
 
+TEST_CASE("LtmModel: has_capacity false once edge is saturated", "[traffic]") {
+    // edge1 storage_veh ≈ 6.67 (see spillback test above) — 7 agents saturate it.
+    auto g = make_chain();
+    LtmTrafficModel model(g);
+    REQUIRE(model.has_capacity(1));
+    for (AgentId a = 0; a < 7; ++a) model.on_enter(1, a, 0.0);
+    REQUIRE_FALSE(model.has_capacity(1));
+}
+
+TEST_CASE("LtmModel: has_capacity true again after downstream link drains", "[traffic]") {
+    auto g = make_chain();
+    LtmTrafficModel model(g);
+    for (AgentId a = 0; a < 7; ++a) model.on_enter(1, a, 0.0);
+    REQUIRE_FALSE(model.has_capacity(1));
+    model.on_exit(1, kInvalidEdge, 0, 100.0);
+    REQUIRE(model.has_capacity(1));
+}
+
+TEST_CASE("QueueModel: has_capacity always true (no storage/spillback concept)", "[traffic]") {
+    auto g = make_single_edge();
+    QueueTrafficModel model(g);
+    for (AgentId a = 0; a < 50; ++a) model.on_enter(0, a, 0.0);
+    REQUIRE(model.has_capacity(0));  // default no-op from ITrafficModel
+}
+
+// ── Discharge-rate token bucket (opt-in) ──────────────────────────────────────
+static LtmTrafficModel::Config discharge_cfg(float burst_s = 3.0f) {
+    LtmTrafficModel::Config cfg;
+    cfg.enable_discharge_cap = true;
+    cfg.discharge_burst_s    = burst_s;
+    return cfg;
+}
+
+TEST_CASE("LtmModel: discharge cap throttles a sustained burst below capacity_veh_s", "[traffic]") {
+    // capacity=3600 veh/h -> capacity_veh_s = 1.0; burst_s=3 -> max_credit=3.0
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);
+    LtmTrafficModel model(g, discharge_cfg(3.0f));
+    for (AgentId a = 0; a < 15; ++a) model.on_enter(0, a, 0.0);
+
+    int exits_at_t0 = 0;
+    for (AgentId a = 0; a < 15; ++a)
+        if (model.on_exit(0, kInvalidEdge, a, 0.0)) ++exits_at_t0;
+    REQUIRE(exits_at_t0 == 3);  // only the burst buffer's worth clears instantly
+
+    // 3s later, exactly one more max_credit's worth (3.0 * 1.0 veh/s) has
+    // accrued -- still far below letting all remaining 12 through.
+    int exits_at_t3 = 0;
+    for (AgentId a = 0; a < 12; ++a)
+        if (model.on_exit(0, kInvalidEdge, a, 3.0)) ++exits_at_t3;
+    REQUIRE(exits_at_t3 == 3);
+}
+
+TEST_CASE("LtmModel: discharge cap never blocks a single isolated reasonable exit", "[traffic]") {
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);
+    LtmTrafficModel model(g, discharge_cfg(10.0f));
+    model.on_enter(0, 0, 0.0);
+    REQUIRE(model.on_exit(0, kInvalidEdge, 0, 0.0));    // starts full -> never blocked
+
+    model.on_enter(0, 1, 100.0);
+    REQUIRE(model.on_exit(0, kInvalidEdge, 1, 100.0));  // ample refill at low rate
+}
+
+TEST_CASE("LtmModel: discharge cap floors max_credit at 1 veh for very low capacity", "[traffic]") {
+    // capacity=100 veh/h -> capacity_veh_s ~ 0.0278; burst_s=10 -> raw product
+    // 0.278 < 1 -- without the max(1.0, ...) floor this would block forever.
+    auto g = make_single_edge(1000.0f, 10.0f, 100.0f);
+    LtmTrafficModel model(g, discharge_cfg(10.0f));
+    model.on_enter(0, 0, 0.0);
+    REQUIRE(model.on_exit(0, kInvalidEdge, 0, 0.0));
+}
+
+TEST_CASE("LtmModel: discharge cap allows a zero-elapsed-time burst (not a rigid headway)", "[traffic]") {
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);  // capacity_veh_s = 1.0
+    LtmTrafficModel model(g, discharge_cfg(3.0f));       // max_credit = 3.0
+    for (AgentId a = 0; a < 4; ++a) model.on_enter(0, a, 0.0);
+
+    // All three succeed at the SAME instant t=0 -- a rigid 1/capacity_veh_s=1s
+    // headway could never allow this.
+    REQUIRE(model.on_exit(0, kInvalidEdge, 0, 0.0));
+    REQUIRE(model.on_exit(0, kInvalidEdge, 1, 0.0));
+    REQUIRE(model.on_exit(0, kInvalidEdge, 2, 0.0));
+    REQUIRE_FALSE(model.on_exit(0, kInvalidEdge, 3, 0.0));  // buffer now empty
+}
+
+TEST_CASE("LtmModel: discharge cap disabled by default preserves current spillback-only behavior", "[traffic]") {
+    auto g = make_chain();
+    LtmTrafficModel model(g, LtmTrafficModel::Config{});  // enable_discharge_cap=false
+    for (AgentId a = 0; a < 50; ++a) model.on_enter(0, a, 0.0);
+    for (AgentId a = 0; a < 50; ++a)
+        REQUIRE(model.on_exit(0, kInvalidEdge, a, 0.0));  // no rate limiting at all
+}
+
 TEST_CASE("LtmModel: force_remove restores occupancy/capacity", "[traffic]") {
     auto g = make_chain();
     LtmTrafficModel model(g);

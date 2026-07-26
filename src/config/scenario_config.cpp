@@ -113,7 +113,11 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
     // ── traffic ─────────────────────────────────────────────────────────────
     if (j.contains("traffic")) {
         const auto& t = j["traffic"];
-        cfg.traffic.model          = t.value("model",          cfg.traffic.model);
+        cfg.traffic.model               = t.value("model", cfg.traffic.model);
+        cfg.traffic.ltm_discharge_cap   = t.value("ltm_discharge_cap",
+                                                    cfg.traffic.ltm_discharge_cap);
+        cfg.traffic.ltm_discharge_burst_s = t.value("ltm_discharge_burst_s",
+                                                      cfg.traffic.ltm_discharge_burst_s);
     }
 
     // ── demand ──────────────────────────────────────────────────────────────
@@ -233,7 +237,9 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["routing"]["cache_entries"]    = cfg.routing.cache_entries;
     j["routing"]["use_traffic_costs"]= cfg.routing.use_traffic_costs;
 
-    j["traffic"]["model"]           = cfg.traffic.model;
+    j["traffic"]["model"]                    = cfg.traffic.model;
+    j["traffic"]["ltm_discharge_cap"]        = cfg.traffic.ltm_discharge_cap;
+    j["traffic"]["ltm_discharge_burst_s"]    = cfg.traffic.ltm_discharge_burst_s;
     j["demand"]["source"]           = cfg.demand.source;
     if (cfg.demand.od_csv)
         j["demand"]["od_csv"]       = cfg.demand.od_csv->string();

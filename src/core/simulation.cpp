@@ -194,7 +194,12 @@ void Simulation::handle_event(const Event& e) {
     ++events_processed_;
     switch (e.type) {
     case EventType::AgentDepart:         ++n_depart_;  handle_depart(e);           break;
-    case EventType::AgentEnterLink:      ++n_enter_;   handle_enter_link(e);       break;
+    // AgentEnterLink is no longer pushed as a queued event by anything (see
+    // handle_depart()/handle_exit_link(): both enter synchronously via
+    // enter_edge_now() to avoid a same-batch staleness race on the
+    // destination edge's occupancy) -- kept in EventType for the hook API
+    // (fire_hooks(EventType::AgentEnterLink, ...) is still called manually
+    // from both), just never dispatched through this switch.
     case EventType::AgentExitLink:       ++n_exit_;    handle_exit_link(e);        break;
     case EventType::AgentArriveActivity: ++n_arrive_;  handle_arrive_activity(e);  break;
     case EventType::AgentReroute:        handle_reroute(e);          break;
@@ -207,14 +212,43 @@ void Simulation::handle_event(const Event& e) {
 void Simulation::handle_depart(const Event& e) {
     AgentId a = e.agent;
     if (a >= hot_.size()) return;
-    hot_.state[a] = AgentState::OnLink;
 
     // Try pre-computed route first (set by inject_demand's pre-routing phase)
     auto pre_edges = routes_.get_route(a);
     if (!pre_edges.empty()) {
-        hot_.route_pos[a]    = 0;
-        hot_.current_edge[a] = pre_edges[0];
-        eq_.push({e.time, a, pre_edges[0], EventType::AgentEnterLink, {}});
+        // Gate a trip's *first* edge: there is no preceding on_exit() call for
+        // a trip origin (no "previous" edge), so on_enter() would otherwise be
+        // reachable with unbounded occupancy — every subsequent transition is
+        // already gated by on_exit()'s spillback check on `next` below.
+        // Reject-and-retry 1s later, same convention as handle_exit_link()'s
+        // spillback rejection. hot_.state[a] is left untouched (stays
+        // AgentState::Waiting) so a rejected departure doesn't falsely
+        // report as OnLink.
+        //
+        // Entered SYNCHRONOUSLY here (enter_edge_now), not via a queued
+        // AgentEnterLink event: within a single drain_until() batch, several
+        // agents' AgentDepart events are processed back-to-back, and any
+        // event newly pushed to eq_ mid-batch (like a queued AgentEnterLink)
+        // only becomes visible on the NEXT drain — so has_capacity() would
+        // see stale (pre-increment) occupancy for every agent already
+        // processed earlier in the SAME batch, and the gate would silently
+        // do nothing whenever multiple departures land in one batch (verified
+        // empirically: a burst of simultaneous departures blew straight past
+        // storage_veh before this synchronous-entry fix). Entering
+        // immediately makes the occupancy increment visible to the very next
+        // iteration of this same batch's dispatch loop.
+        // n_enter_/fire_hooks are done here explicitly since this path never
+        // dispatches a genuine AgentEnterLink event (handle_event's switch,
+        // which normally does both, is bypassed for this transition).
+        if (traffic_ && hot_.mode[a] == AgentMode::Car && !traffic_->has_capacity(pre_edges[0])) {
+            ++n_depart_rejected_;
+            eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
+            return;
+        }
+        hot_.route_pos[a] = 0;
+        enter_edge_now(a, pre_edges[0], e.time);
+        ++n_enter_;
+        fire_hooks(EventType::AgentEnterLink, {e.time, a, pre_edges[0], EventType::AgentEnterLink, {}});
         return;
     }
 
@@ -234,26 +268,22 @@ void Simulation::handle_depart(const Event& e) {
         return;
     }
 
-    routes_.push_route(a, route.edges);
-    hot_.route_pos[a]   = 0;
-    hot_.current_edge[a]= route.edges[0];
-
-    Event enter{e.time, a, route.edges[0], EventType::AgentEnterLink, {}};
-    eq_.push(enter);
-}
-
-void Simulation::handle_enter_link(const Event& e) {
-    AgentId a   = e.agent;
-    EdgeId  eid = static_cast<EdgeId>(e.payload);
-    if (a >= hot_.size()) return;
-    if (hot_.state[a] == AgentState::Arrived) return;  // already teleported
-    if (!graph_ || eid >= graph_->num_edges()) {
-        hot_.state[a] = AgentState::Arrived;
+    if (traffic_ && hot_.mode[a] == AgentMode::Car && !traffic_->has_capacity(route.edges[0])) {
+        ++n_depart_rejected_;
+        eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
         return;
     }
 
+    routes_.push_route(a, route.edges);
+    hot_.route_pos[a] = 0;
+    enter_edge_now(a, route.edges[0], e.time);
+    ++n_enter_;
+    fire_hooks(EventType::AgentEnterLink, {e.time, a, route.edges[0], EventType::AgentEnterLink, {}});
+}
+
+void Simulation::enter_edge_now(AgentId a, EdgeId eid, SimTime t) {
     hot_.current_edge[a] = eid;
-    hot_.enter_time[a]   = e.time;
+    hot_.enter_time[a]   = t;
     hot_.state[a]        = AgentState::OnLink;
 
     // Only Car agents interact with the (car-calibrated) traffic model —
@@ -261,9 +291,9 @@ void Simulation::handle_enter_link(const Event& e) {
     // congestion interaction (no pedestrian/bike congestion model exists).
     SimTime exit_time;
     if (traffic_ && hot_.mode[a] == AgentMode::Car) {
-        exit_time = traffic_->on_enter(eid, a, e.time);
+        exit_time = traffic_->on_enter(eid, a, t);
     } else {
-        exit_time = e.time + graph_->mode_free_flow_time(
+        exit_time = t + graph_->mode_free_flow_time(
             eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
     }
 
@@ -303,7 +333,22 @@ void Simulation::handle_exit_link(const Event& e) {
         return;
     }
 
-    eq_.push({e.time, a, next, EventType::AgentEnterLink, {}});
+    // Entered SYNCHRONOUSLY (enter_edge_now), not via a queued AgentEnterLink
+    // event — the exact same-batch staleness bug fixed in handle_depart()
+    // also applies here: if several agents from DIFFERENT upstream edges exit
+    // onto this SAME `next` within one drain_until() batch, on_exit()'s
+    // spillback check on `next` (above) reads its occupancy BEFORE any of
+    // them actually increment it (a queued AgentEnterLink only lands on the
+    // NEXT batch) — so every one of them passes the check against the same
+    // stale value, and `next` can end up over storage_veh despite each
+    // individual on_exit() call looking correct in isolation. Confirmed
+    // empirically: this was the source of a residual Via de Cintura
+    // over-capacity reading (126%) that survived the handle_depart() fix
+    // alone. Entering here immediately makes the increment visible to the
+    // very next iteration of this same batch's dispatch loop.
+    enter_edge_now(a, next, e.time);
+    ++n_enter_;
+    fire_hooks(EventType::AgentEnterLink, {e.time, a, next, EventType::AgentEnterLink, {}});
 }
 
 void Simulation::handle_arrive_activity(const Event& e) {
@@ -367,6 +412,22 @@ void Simulation::teleport_stuck_agents(SimTime now) {
     const uint32_t N = static_cast<uint32_t>(hot_.size());
     uint64_t batch = 0;
     for (AgentId a = 0; a < N; ++a) {
+        if (hot_.state[a] == AgentState::Waiting) {
+            // A departure can now be rejected indefinitely by
+            // ITrafficModel::has_capacity() if its origin edge never frees
+            // up (see handle_depart()) — unlike OnLink agents there is no
+            // route-based free-flow time to scale a ratio threshold from
+            // (the agent hasn't started moving), so this uses the hard cap
+            // only, same stuck_max_hours ceiling as below.
+            if (hard_cap_s == std::numeric_limits<double>::infinity()) continue;
+            double depart = cold_.plans[a].activities.empty()
+                          ? cfg_.start_time
+                          : cold_.plans[a].activities[0].start_time;
+            if (now - depart <= hard_cap_s) continue;
+            hot_.state[a] = AgentState::Arrived;
+            ++batch;
+            continue;
+        }
         if (hot_.state[a] != AgentState::OnLink) continue;
         float ff = hot_.freeflow_route_s[a];
         if (ff <= 0.0f) continue;
@@ -600,9 +661,9 @@ void Simulation::run_until(SimTime until) {
         }
     }
 
-    spdlog::info("Event types: Depart={} Enter={} Exit={} Arrive={} Teleported={}",
+    spdlog::info("Event types: Depart={} Enter={} Exit={} Arrive={} Teleported={} DepartRejected={}",
         n_depart_.load(), n_enter_.load(), n_exit_.load(), n_arrive_.load(),
-        n_teleported_.load());
+        n_teleported_.load(), n_depart_rejected_.load());
     spdlog::info("Final states: Waiting={} OnLink={} AtActivity={} Arrived={}",
         n_waiting, n_onlink, n_atact, n_arrived);
     spdlog::info("Queue remaining: {} events | Slow edges (ff>1h): {}",
