@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <nomad/core/graph.hpp>
@@ -266,6 +267,110 @@ TEST_CASE("LtmModel: discharge cap disabled by default preserves current spillba
     for (AgentId a = 0; a < 50; ++a) model.on_enter(0, a, 0.0);
     for (AgentId a = 0; a < 50; ++a)
         REQUIRE(model.on_exit(0, kInvalidEdge, a, 0.0));  // no rate limiting at all
+}
+
+// ── Discharge-gate wait signal (opt-in, Phase 4) ──────────────────────────────
+// travel_time_for() is private; observed indirectly via current_travel_time(),
+// which update() refreshes from travel_time_for() for any edge with
+// occupancy > 0 (a blocked-but-not-exited agent keeps the edge in the active
+// set, so update() always has something to recompute here).
+
+TEST_CASE("LtmModel: gate wait grows monotonically while the discharge check keeps blocking", "[traffic]") {
+    // capacity=3600 veh/h -> capacity_veh_s = 1.0; burst_s=1 -> max_credit=1.0,
+    // so a second agent packed onto a nearly-empty bucket blocks immediately.
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);
+    LtmTrafficModel model(g, discharge_cfg(1.0f));
+    model.on_enter(0, 0, 0.0);
+    model.on_enter(0, 1, 0.0);
+
+    REQUIRE(model.on_exit(0, kInvalidEdge, 0, 0.0));         // consumes the only credit
+    REQUIRE_FALSE(model.on_exit(0, kInvalidEdge, 1, 0.0));   // blocked, gate wait starts at 0
+    model.update(0.0);
+    float tt0 = model.current_travel_time(0);
+
+    REQUIRE_FALSE(model.on_exit(0, kInvalidEdge, 1, 0.5));   // still blocked, wait=0.5s
+    model.update(0.5);
+    float tt1 = model.current_travel_time(0);
+
+    // Stay within the 1.0s burst window (max_credit=1.0, refills at 1.0/s) --
+    // past 1.0s since the block started the bucket would be full again and
+    // this exit would succeed, which is a different scenario (tested below).
+    REQUIRE_FALSE(model.on_exit(0, kInvalidEdge, 1, 0.9));   // still blocked, wait=0.9s
+    model.update(0.9);
+    float tt2 = model.current_travel_time(0);
+
+    REQUIRE(tt1 > tt0);
+    REQUIRE(tt2 > tt1);
+}
+
+TEST_CASE("LtmModel: a successful exit resets gate wait immediately", "[traffic]") {
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);  // capacity_veh_s = 1.0
+    LtmTrafficModel model(g, discharge_cfg(1.0f));       // max_credit = 1.0
+    model.on_enter(0, 0, 0.0);
+    model.on_enter(0, 1, 0.0);
+
+    REQUIRE(model.on_exit(0, kInvalidEdge, 0, 0.0));
+    REQUIRE_FALSE(model.on_exit(0, kInvalidEdge, 1, 0.1));   // blocked, gate wait starts at 0
+    // Block persists a bit longer -- gate_wait_s is now nonzero (duration since 0.1).
+    REQUIRE_FALSE(model.on_exit(0, kInvalidEdge, 1, 0.3));
+    model.update(0.3);
+    REQUIRE(model.current_travel_time(0) > 100.0f);          // ff=100s + gate_wait_s(~0.2s)
+
+    // Let credit refill fully (well past the 1.0s burst window), exit succeeds.
+    REQUIRE(model.on_exit(0, kInvalidEdge, 1, 5.0));
+    model.update(5.0);
+    // Only one agent left (occupancy=1, well under 80% of storage) -> plain
+    // free-flow time, no residual gate term.
+    REQUIRE(model.current_travel_time(0) == Catch::Approx(100.0f).epsilon(0.01));
+}
+
+TEST_CASE("LtmModel: gate wait term is additive only when discharge cap is enabled", "[traffic]") {
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);
+
+    // Cap disabled: the discharge-check branch in on_exit() never executes,
+    // so gate_wait_s can never become nonzero -- current_travel_time() must
+    // match the plain BPR-only formula exactly (byte-identical to pre-Phase-4).
+    LtmTrafficModel off_model(g, LtmTrafficModel::Config{});
+    for (AgentId a = 0; a < 30; ++a) off_model.on_enter(0, a, 0.0);  // occ=30 (storage_veh=300)
+    off_model.update(0.0);
+    float tt_off = off_model.current_travel_time(0);
+
+    // Same occupancy, cap enabled but burst generous enough to never block --
+    // should match the disabled case exactly (gate_wait_s stays 0).
+    LtmTrafficModel on_model(g, discharge_cfg(1000.0f));
+    for (AgentId a = 0; a < 30; ++a) on_model.on_enter(0, a, 0.0);
+    on_model.update(0.0);
+    float tt_on_unblocked = on_model.current_travel_time(0);
+
+    REQUIRE(tt_off == Catch::Approx(tt_on_unblocked).epsilon(0.001));
+}
+
+TEST_CASE("LtmModel: occupancy-driven congestion alone never sets gate wait", "[traffic]") {
+    // High occupancy (vc near/at 1) but discharge cap generous enough that
+    // on_exit() never fails the credit check -- gate_wait_s must stay 0, i.e.
+    // current_travel_time() must equal the plain BPR value for this vc.
+    auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);  // storage_veh = 300
+    LtmTrafficModel model(g, discharge_cfg(1000.0f));  // effectively never binds
+    for (AgentId a = 0; a < 270; ++a) model.on_enter(0, a, 0.0);  // vc = 270/300 = 0.9
+    model.update(0.0);
+    float tt = model.current_travel_time(0);
+
+    for (AgentId a = 0; a < 5; ++a)
+        REQUIRE(model.on_exit(0, kInvalidEdge, a, 0.0));  // ample credit, never blocked
+    model.update(0.0);
+    REQUIRE(model.current_travel_time(0) == Catch::Approx(tt).epsilon(0.05));
+}
+
+TEST_CASE("LtmModel: gate-wait fields leave disabled-by-default spillback behavior byte-identical", "[traffic]") {
+    // Re-run the exact disabled-cap spillback scenario from earlier in this
+    // file with the new Cell fields present -- guards against an accidental
+    // unconditional write to gate_block_since/gate_wait_s.
+    auto g = make_chain();
+    LtmTrafficModel model(g, LtmTrafficModel::Config{});  // enable_discharge_cap=false
+    for (AgentId a = 0; a < 50; ++a) model.on_enter(0, a, 0.0);
+    for (AgentId a = 0; a < 50; ++a)
+        REQUIRE(model.on_exit(0, kInvalidEdge, a, 0.0));  // no rate limiting at all
+    REQUIRE(model.link_states()[0].occupancy.load() == 0.0f);
 }
 
 TEST_CASE("LtmModel: force_remove restores occupancy/capacity", "[traffic]") {

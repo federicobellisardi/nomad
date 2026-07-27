@@ -42,12 +42,17 @@ float LtmTrafficModel::travel_time_for(EdgeId e) const {
     float ff  = graph_.free_flow_time(e);
     float cap = c.storage_veh;
     float occ = static_cast<float>(c.occupancy);
-    if (cap <= 0.0f || occ / cap < 0.8f) return ff;
+    // Discharge-gate wait: additive, only when the cap is enabled. Added
+    // before the early-return below so a discharge-blocked edge still gets a
+    // congestion signal even while occ/cap sits under 0.8 (the gate can bind
+    // on a link that isn't storage-congested at all).
+    float gate_term = cfg_.enable_discharge_cap ? c.gate_wait_s : 0.0f;
+    if (cap <= 0.0f || occ / cap < 0.8f) return ff + gate_term;
     // Same BPR volume-delay shape as QueueTrafficModel, capped at vc=2 → 3.4× ff.
     // Reusing it here isolates the effect under test to the new exit-side
     // spillback gate rather than also changing the delay formula.
     float vc = std::min(occ / cap, 2.0f);
-    return ff * (1.0f + 0.15f * std::pow(vc, 4.0f));
+    return ff * (1.0f + 0.15f * std::pow(vc, 4.0f)) + gate_term;
 }
 
 SimTime LtmTrafficModel::on_enter(EdgeId e, AgentId /*a*/, SimTime t) {
@@ -101,8 +106,17 @@ bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId /*a*/, SimTime t) {
     // comment) -- this bucket only blocks once a SUSTAINED burst exceeds
     // discharge_burst_s worth of capacity, not on isolated exits.
     if (cfg_.enable_discharge_cap) {
-        if (c.discharge_credit < 1.0f) return false;
+        if (c.discharge_credit < 1.0f) {
+            // Gate is binding: start (or continue) tracking how long it's
+            // been continuously blocked -- see travel_time_for().
+            if (c.gate_block_since < 0.0) c.gate_block_since = t;
+            c.gate_wait_s = static_cast<float>(t - c.gate_block_since);
+            return false;
+        }
         c.discharge_credit -= 1.0f;
+        // Gate no longer binding for this exit -- reset.
+        c.gate_block_since = -1.0;
+        c.gate_wait_s = 0.0f;
     }
 
     if (c.occupancy > 0) --c.occupancy;
