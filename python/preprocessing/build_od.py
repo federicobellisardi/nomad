@@ -325,7 +325,8 @@ def build_od_rows(od_fua: pd.DataFrame,
                   bike_nodes: "set | None" = None,
                   scale: float = 1.0,
                   occupancy_factor: float = 1.0,
-                  mode_choice_fn=None) -> pd.DataFrame:
+                  mode_choice_fn=None,
+                  transit_frac_override: "float | None" = None) -> pd.DataFrame:
     """Convert zone-level MITMA OD to node-level nomad OD rows.
 
     occupancy_factor: average persons per car trip.  Divides car person-trips
@@ -348,6 +349,18 @@ def build_od_rows(od_fua: pd.DataFrame,
     apply time-of-day-dependent behaviour (e.g. a peak-hour congestion
     adjustment) without breaking callers whose mode_choice_fn only takes
     distance_km.
+
+    transit_frac_override: optional real, city-specific transit (public
+    transport) mode share [0-1]. DISTANCE_MODE_FRACTIONS's own "transit"
+    value is a flat, national, distance-band-only figure -- never
+    calibrated per city. When given, this REPLACES that flat value for
+    every row regardless of distance band (a single scalar is the honest
+    level of precision real per-city evidence currently supports; no
+    per-band city transit data exists). car/walk/bike (whichever source
+    produced them, mode_choice_fn or DISTANCE_MODE_FRACTIONS) are rescaled
+    to fill the remaining (1 - transit_frac_override) mass, same rescaling
+    convention mode_choice_fn already uses. Backward compatible: if None
+    (default), behaviour is unchanged.
     """
     COL_ORIG   = cols["orig"]
     COL_DEST   = cols["dest"]
@@ -405,6 +418,24 @@ def build_od_rows(od_fua: pd.DataFrame,
                 # se dist_km non calcolabile (riga senza banda riconosciuta e
                 # senza viajes_km), resta il fallback DISTANCE_MODE_FRACTIONS
                 # gia' assegnato sopra -- non silenziosamente 0 o inventato.
+
+            if transit_frac_override is not None:
+                # Sostituisce la quota transit (fissa, nazionale, mai
+                # calibrata per citta') con il valore reale città-specifico,
+                # riscalando proporzionalmente auto/piedi/bici in modo da
+                # preservare il loro rapporto relativo -- che venga da
+                # mode_choice_fn o dal fallback DISTANCE_MODE_FRACTIONS.
+                old_transit = mode_fracs.get("transit", 0.0)
+                old_remainder = 1.0 - old_transit
+                if old_remainder > 0:
+                    scale_factor = (1.0 - transit_frac_override) / old_remainder
+                    mode_fracs = {
+                        mode: (transit_frac_override if mode == "transit" else p * scale_factor)
+                        for mode, p in mode_fracs.items()
+                    }
+                # old_remainder == 0 (riga degenere, 100% transit): niente da
+                # riscalare proporzionalmente -- lasciata invariata piuttosto
+                # che inventare una ripartizione auto/piedi/bici dal nulla.
         else:
             mode_fracs = {"car": 1.0}
 
@@ -468,12 +499,13 @@ def build_od_rows(od_fua: pd.DataFrame,
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def main(argv=None, mode_choice_fn=None) -> None:
+def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
     """argv: lista di argomenti CLI espliciti (None = usa sys.argv, come
-    prima). mode_choice_fn: passato a build_od_rows() (vedi la sua
-    docstring) -- None per default, comportamento identico a prima.
-    Entrambi permettono a un chiamante Python di invocare questa funzione
-    direttamente (import, non subprocess) senza toccare sys.argv."""
+    prima). mode_choice_fn, transit_frac_override: passati a
+    build_od_rows() (vedi la sua docstring) -- None per default,
+    comportamento identico a prima. Tutti e tre permettono a un chiamante
+    Python di invocare questa funzione direttamente (import, non
+    subprocess) senza toccare sys.argv."""
     parser = argparse.ArgumentParser(description="Genera matrici OD nomad da dati MITMA")
     parser.add_argument("--city", required=True,
                         help="Nome città (es. 'Palma de Mallorca')")
@@ -651,7 +683,8 @@ def main(argv=None, mode_choice_fn=None) -> None:
                                  car_nodes=car_nodes, walk_nodes=walk_nodes,
                                  bike_nodes=bike_nodes, scale=args.scale,
                                  occupancy_factor=args.occupancy_factor,
-                                 mode_choice_fn=mode_choice_fn)
+                                 mode_choice_fn=mode_choice_fn,
+                                 transit_frac_override=transit_frac_override)
         print(f"  righe: {len(od_nomad):,}   agenti: {od_nomad['count'].sum():,}")
 
         od_path = city_dir / f"od_{city_slug}_{label}.csv"
