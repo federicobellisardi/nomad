@@ -33,6 +33,16 @@ namespace nomad {
 // link almost always finds the bucket full. Default OFF so existing
 // spillback-only behaviour is unchanged unless explicitly enabled.
 //
+// Discharge-gate wait signal: travel_time_for()'s BPR term is driven by
+// occupancy/storage_veh, which the departure/exit-link capacity gates keep
+// permanently near 1.0 -- so it cannot reflect discharge-rate-limited delay
+// once those gates are working correctly (occupancy simply never builds up
+// enough to move the ratio). Cell::gate_wait_s tracks how long the discharge
+// check has been continuously blocking exits and is added on top of the BPR
+// term (only when enable_discharge_cap is true), giving congestion_ema and
+// current_travel_time() -- and therefore schedule_reroutes() -- a real
+// signal for this specific bottleneck.
+//
 // storage_veh and capacity accounting reuse the exact conventions validated
 // in QueueTrafficModel (50m effective-length floor, kJamDensity = 1/7.5) so
 // the two models are directly comparable.
@@ -73,6 +83,17 @@ private:
         // enable_discharge_cap is false.
         float    discharge_credit{0.0f};    // accrued exit "tokens" [veh]
         double   last_credit_update{0.0};   // sim time of last accrual
+
+        // Discharge-gate wait signal (opt-in, see travel_time_for()). Tracks
+        // how long the head-of-queue exit has been continuously blocked by
+        // the discharge-credit check -- an additive congestion proxy that,
+        // unlike occupancy/storage_veh, is not saturated near 1.0 by the
+        // departure/exit-link capacity gates. Unused/inert when
+        // enable_discharge_cap is false. Sentinel is -1.0, not 0.0: SimTime
+        // 0.0 is a legitimate, common simulation timestamp (sim start), so
+        // it cannot double as "not currently blocked".
+        double   gate_block_since{-1.0};    // sim time the block started; -1 = not blocked
+        float    gate_wait_s{0.0f};         // duration of the current continuous block
     };
 
     float travel_time_for(EdgeId e) const;
