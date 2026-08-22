@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import datetime as dt
+import inspect
 import os
 import re
 import sys
@@ -108,6 +109,7 @@ def detect_columns(sample_path: Path) -> dict:
         "trips":    pick("viajes", "trips")        or "viajes",
         "mode":     pick("modo", "mode", "medio"),
         "distance": pick("distancia", "distance"),
+        "km":       pick("viajes_km", "km"),
     }
 
 
@@ -137,6 +139,12 @@ def stream_viajes(viajes_files: list, cols: dict,
     Uses a dict accumulator (key → [sum, count]) instead of DataFrame merges
     to keep memory proportional to the number of unique OD pairs, not to
     the product of files × pairs.
+
+    If cols["km"] is available (MITMA's "viajes_km" field), it is also
+    averaged per key and returned as an extra column -- this lets a caller
+    compute a real per-row average trip distance (viajes_km/viajes) instead
+    of only having the coarse distance BAND, without changing behaviour for
+    any caller that doesn't need it.
     """
     COL_ORIG   = cols["orig"]
     COL_DEST   = cols["dest"]
@@ -144,13 +152,15 @@ def stream_viajes(viajes_files: list, cols: dict,
     COL_TRIPS  = cols["trips"]
     COL_MODE   = cols["mode"]
     COL_DIST   = cols["distance"]
+    COL_KM     = cols.get("km")
     group_cols = (
         [COL_ORIG, COL_DEST, COL_PERIOD]
         + ([COL_MODE] if COL_MODE else [])
         + ([COL_DIST] if COL_DIST else [])
     )
+    read_cols = group_cols + [COL_TRIPS] + ([COL_KM] if COL_KM else [])
 
-    # key → [trips_sum, days_seen]
+    # key → [trips_sum, days_seen] or [trips_sum, days_seen, km_sum] if COL_KM
     acc: dict = {}
     n_used = 0
 
@@ -166,18 +176,25 @@ def stream_viajes(viajes_files: list, cols: dict,
         df = pd.read_csv(fpath, sep="|",
                          compression="gzip" if gz else None,
                          dtype={COL_ORIG: str, COL_DEST: str},
-                         usecols=group_cols + [COL_TRIPS])
+                         usecols=read_cols)
         df = df[df[COL_ORIG].isin(fua_zone_ids) & df[COL_DEST].isin(fua_zone_ids)]
         df[COL_PERIOD] = pd.to_numeric(df[COL_PERIOD], errors="coerce")
         df[COL_TRIPS]  = pd.to_numeric(df[COL_TRIPS],  errors="coerce").fillna(0)
+        if COL_KM:
+            df[COL_KM] = pd.to_numeric(df[COL_KM], errors="coerce").fillna(0)
 
-        day_sum = df.groupby(group_cols)[COL_TRIPS].sum()
-        for key, val in day_sum.items():
+        agg_cols = [COL_TRIPS] + ([COL_KM] if COL_KM else [])
+        day_sum = df.groupby(group_cols)[agg_cols].sum()
+        for key, row in day_sum.iterrows():
+            trips_val = row[COL_TRIPS]
+            km_val = row[COL_KM] if COL_KM else None
             if key in acc:
-                acc[key][0] += val
+                acc[key][0] += trips_val
                 acc[key][1] += 1
+                if COL_KM:
+                    acc[key][2] += km_val
             else:
-                acc[key] = [val, 1]
+                acc[key] = [trips_val, 1] + ([km_val] if COL_KM else [])
 
         n_used += 1
         print(f"  [{n_used}] {fpath.name}", end="\r")
@@ -195,10 +212,15 @@ def stream_viajes(viajes_files: list, cols: dict,
 
     rows = {col: [] for col in group_cols}
     rows[COL_TRIPS] = []
-    for key, (s, c) in zip(keys, acc.values()):
+    if COL_KM:
+        rows[COL_KM] = []
+    for key, vals in zip(keys, acc.values()):
         for col, val in zip(group_cols, key):
             rows[col].append(val)
+        s, c = vals[0], vals[1]
         rows[COL_TRIPS].append(s / c)
+        if COL_KM:
+            rows[COL_KM].append(vals[2] / c)
 
     return pd.DataFrame(rows)
 
@@ -284,6 +306,14 @@ def mode_node_pool(mode: str,
     return all_pool
 
 
+#: banda -> distanza rappresentativa (km), usata SOLO come fallback quando
+#: viajes_km non e' disponibile per una riga -- il caso normale usa invece
+#: la distanza media reale (viajes_km/viajes) di quella riga specifica.
+DISTANCE_BAND_FALLBACK_KM: dict[str, float] = {
+    "0.5-2": 1.25, "2-10": 6.0, "10-50": 30.0, ">50": 70.0,
+}
+
+
 def build_od_rows(od_fua: pd.DataFrame,
                   zone_to_nodes: dict,
                   cols: dict,
@@ -294,12 +324,43 @@ def build_od_rows(od_fua: pd.DataFrame,
                   walk_nodes: "set | None" = None,
                   bike_nodes: "set | None" = None,
                   scale: float = 1.0,
-                  occupancy_factor: float = 1.0) -> pd.DataFrame:
+                  occupancy_factor: float = 1.0,
+                  mode_choice_fn=None,
+                  transit_frac_override: "float | None" = None) -> pd.DataFrame:
     """Convert zone-level MITMA OD to node-level nomad OD rows.
 
     occupancy_factor: average persons per car trip.  Divides car person-trips
     to obtain vehicle-trips (e.g. 1.20 for Spain average).  Set to 1.0 to
     keep raw person-trips as vehicle-trips.
+
+    mode_choice_fn: optional callable(distance_km: float) -> dict with keys
+    "car"/"walk"/"bike" (fractions of the non-transit, non-other subset,
+    summing to 1.0). When given (and a distance band column exists), this
+    REPLACES the car/walk/bike split from DISTANCE_MODE_FRACTIONS for that
+    row -- the "transit" fraction from DISTANCE_MODE_FRACTIONS is kept
+    unchanged (this function has no data source for transit's own share),
+    and car/walk/bike are rescaled to fill the remaining (1 - transit) mass.
+    Backward compatible: if None (default), behaviour is byte-for-byte
+    identical to before this parameter existed.
+
+    If mode_choice_fn declares a `period` parameter (checked once via
+    inspect.signature, not per-row), it is also called as
+    mode_choice_fn(distance_km, period=<MITMA hour 0-23>) -- lets a caller
+    apply time-of-day-dependent behaviour (e.g. a peak-hour congestion
+    adjustment) without breaking callers whose mode_choice_fn only takes
+    distance_km.
+
+    transit_frac_override: optional real, city-specific transit (public
+    transport) mode share [0-1]. DISTANCE_MODE_FRACTIONS's own "transit"
+    value is a flat, national, distance-band-only figure -- never
+    calibrated per city. When given, this REPLACES that flat value for
+    every row regardless of distance band (a single scalar is the honest
+    level of precision real per-city evidence currently supports; no
+    per-band city transit data exists). car/walk/bike (whichever source
+    produced them, mode_choice_fn or DISTANCE_MODE_FRACTIONS) are rescaled
+    to fill the remaining (1 - transit_frac_override) mass, same rescaling
+    convention mode_choice_fn already uses. Backward compatible: if None
+    (default), behaviour is unchanged.
     """
     COL_ORIG   = cols["orig"]
     COL_DEST   = cols["dest"]
@@ -307,6 +368,14 @@ def build_od_rows(od_fua: pd.DataFrame,
     COL_TRIPS  = cols["trips"]
     COL_MODE   = cols["mode"]
     COL_DIST   = cols["distance"]
+    COL_KM     = cols.get("km")
+
+    mode_choice_fn_accepts_period = False
+    if mode_choice_fn is not None:
+        try:
+            mode_choice_fn_accepts_period = "period" in inspect.signature(mode_choice_fn).parameters
+        except (TypeError, ValueError):
+            mode_choice_fn_accepts_period = False
 
     rows = []
     skipped = 0.0
@@ -333,6 +402,40 @@ def build_od_rows(od_fua: pd.DataFrame,
             mode_fracs = DISTANCE_MODE_FRACTIONS.get(str(r[COL_DIST]),
                                                       {"car": 0.5, "walk": 0.3,
                                                        "bike": 0.1, "transit": 0.1})
+            if mode_choice_fn is not None:
+                transit_frac = mode_fracs.get("transit", 0.0)
+                km_val = r[COL_KM] if COL_KM else None
+                trips_val = r[COL_TRIPS]
+                dist_km = (km_val / trips_val if km_val and trips_val and km_val > 0 and trips_val > 0
+                           else DISTANCE_BAND_FALLBACK_KM.get(str(r[COL_DIST])))
+                if dist_km is not None and dist_km > 0:
+                    if mode_choice_fn_accepts_period:
+                        cwb = mode_choice_fn(dist_km, period=int(r[COL_PERIOD]))
+                    else:
+                        cwb = mode_choice_fn(dist_km)
+                    mode_fracs = {mode: p * (1.0 - transit_frac) for mode, p in cwb.items()}
+                    mode_fracs["transit"] = transit_frac
+                # se dist_km non calcolabile (riga senza banda riconosciuta e
+                # senza viajes_km), resta il fallback DISTANCE_MODE_FRACTIONS
+                # gia' assegnato sopra -- non silenziosamente 0 o inventato.
+
+            if transit_frac_override is not None:
+                # Sostituisce la quota transit (fissa, nazionale, mai
+                # calibrata per citta') con il valore reale città-specifico,
+                # riscalando proporzionalmente auto/piedi/bici in modo da
+                # preservare il loro rapporto relativo -- che venga da
+                # mode_choice_fn o dal fallback DISTANCE_MODE_FRACTIONS.
+                old_transit = mode_fracs.get("transit", 0.0)
+                old_remainder = 1.0 - old_transit
+                if old_remainder > 0:
+                    scale_factor = (1.0 - transit_frac_override) / old_remainder
+                    mode_fracs = {
+                        mode: (transit_frac_override if mode == "transit" else p * scale_factor)
+                        for mode, p in mode_fracs.items()
+                    }
+                # old_remainder == 0 (riga degenere, 100% transit): niente da
+                # riscalare proporzionalmente -- lasciata invariata piuttosto
+                # che inventare una ripartizione auto/piedi/bici dal nulla.
         else:
             mode_fracs = {"car": 1.0}
 
@@ -396,7 +499,13 @@ def build_od_rows(od_fua: pd.DataFrame,
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
+    """argv: lista di argomenti CLI espliciti (None = usa sys.argv, come
+    prima). mode_choice_fn, transit_frac_override: passati a
+    build_od_rows() (vedi la sua docstring) -- None per default,
+    comportamento identico a prima. Tutti e tre permettono a un chiamante
+    Python di invocare questa funzione direttamente (import, non
+    subprocess) senza toccare sys.argv."""
     parser = argparse.ArgumentParser(description="Genera matrici OD nomad da dati MITMA")
     parser.add_argument("--city", required=True,
                         help="Nome città (es. 'Palma de Mallorca')")
@@ -411,7 +520,13 @@ def main() -> None:
     parser.add_argument("--occupancy-factor", type=float, default=1.20,
                         help="Persone per viaggio in auto (default: 1.20, media Spagna). "
                              "Converte person-trips MITMA → vehicle-trips. Usa 1.0 per disabilitare.")
-    args = parser.parse_args()
+    parser.add_argument("--months", default=None,
+                        help="Sottocartelle di YYYY-MM in data_dir/od_raw da usare (comma-separated, "
+                             "es. '2022-02'). Default: TUTTE quelle trovate in od_raw -- ATTENZIONE, "
+                             "se sono presenti piu' mesi scaricati (es. per citta' diverse), il default "
+                             "li mischia tutti insieme silenziosamente. Specificare sempre esplicitamente "
+                             "quando od_raw puo' contenere piu' di un mese.")
+    args = parser.parse_args(argv)
 
     data_dir  = Path(args.data_dir)
     city_slug = slugify(args.city)
@@ -488,10 +603,25 @@ def main() -> None:
     print(f"  {len(joined):,} nodi nella FUA  |  {len(zone_to_nodes)} distretti con nodi")
 
     # ── Viajes files + festivi ────────────────────────────────────────────────
-    viajes_files = (sorted(od_raw.glob("**/*iajes*.csv.gz")) +
-                    sorted(od_raw.glob("**/*iajes*.csv")))
+    if args.months:
+        month_dirs = [od_raw / m.strip() for m in args.months.split(",")]
+        missing = [d for d in month_dirs if not d.is_dir()]
+        if missing:
+            raise SystemExit(f"cartelle mese non trovate: {missing}")
+        viajes_files = sorted(
+            [f for d in month_dirs for f in d.glob("*iajes*.csv.gz")] +
+            [f for d in month_dirs for f in d.glob("*iajes*.csv")]
+        )
+    else:
+        all_month_dirs = sorted(p.name for p in od_raw.iterdir() if p.is_dir() and p.name[:1].isdigit())
+        if len(all_month_dirs) > 1:
+            print(f"  ATTENZIONE: {len(all_month_dirs)} mesi trovati in {od_raw} ({all_month_dirs}) "
+                  "e --months non specificato -- verranno usati TUTTI insieme, mischiati. "
+                  "Specificare --months per selezionarne uno solo.")
+        viajes_files = (sorted(od_raw.glob("**/*iajes*.csv.gz")) +
+                        sorted(od_raw.glob("**/*iajes*.csv")))
     if not viajes_files:
-        raise SystemExit(f"Nessun file viajes in {od_raw}")
+        raise SystemExit(f"Nessun file viajes in {od_raw}" + (f" per i mesi {args.months}" if args.months else ""))
 
     cols = detect_columns(viajes_files[0])
     print(f"Colonne MITMA: {cols}")
@@ -552,7 +682,9 @@ def main() -> None:
         od_nomad = build_od_rows(od_fua, zone_to_nodes, cols, rng, args.noise_sigma,
                                  car_nodes=car_nodes, walk_nodes=walk_nodes,
                                  bike_nodes=bike_nodes, scale=args.scale,
-                                 occupancy_factor=args.occupancy_factor)
+                                 occupancy_factor=args.occupancy_factor,
+                                 mode_choice_fn=mode_choice_fn,
+                                 transit_frac_override=transit_frac_override)
         print(f"  righe: {len(od_nomad):,}   agenti: {od_nomad['count'].sum():,}")
 
         od_path = city_dir / f"od_{city_slug}_{label}.csv"

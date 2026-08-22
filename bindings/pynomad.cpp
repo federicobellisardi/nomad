@@ -14,9 +14,13 @@
 #include <nomad/routing/astar_router.hpp>
 #include <nomad/routing/ch_router.hpp>
 #include <nomad/routing/route_cache.hpp>
+#include <nomad/routing/router.hpp>
 #include <nomad/traffic/queue_model.hpp>
 #include <nomad/traffic/ltm_model.hpp>
 #include <nomad/transit/gtfs_loader.hpp>
+
+#include <algorithm>
+#include <tuple>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -49,6 +53,27 @@ static EventType parse_event_type(const std::string& s) {
     throw py::value_error("Unknown event type: " + s);
 }
 
+// Simulation::run()/run_until()/step() silently no-op instead of erroring
+// when no router (and/or no traffic model) has been attached — pre-routing
+// short-circuits on a null router_ (see simulation.cpp: compute_route /
+// generate_initial_routes), so agents are generated but never routed or
+// moved, and the run "succeeds" with an empty result. This turns that into
+// an explicit, actionable Python exception at the point of use.
+static void require_ready(const Simulation& s) {
+    if (!s.has_router())
+        throw py::value_error(
+            "Simulation has no router attached — call set_router(AStarRouter(graph)) "
+            "(mode-aware; required for walk/bike) or set_router(CHRouter(graph)) "
+            "(car-only) before run()/run_until()/step(). Without a router, "
+            "pre-routing silently no-ops and no agent ever moves.");
+    if (!s.has_traffic_model())
+        throw py::value_error(
+            "Simulation has no traffic model attached — call "
+            "set_traffic_model(QueueTrafficModel(graph)) or "
+            "set_traffic_model(LtmTrafficModel(graph)) before "
+            "run()/run_until()/step().");
+}
+
 PYBIND11_MODULE(_nomad_core, m) {
     m.doc() = "nomad urban mobility simulator — C++ core";
 
@@ -66,6 +91,32 @@ PYBIND11_MODULE(_nomad_core, m) {
         .value("OnLink",     AgentState::OnLink)
         .value("AtActivity", AgentState::AtActivity)
         .value("Arrived",    AgentState::Arrived)
+        .export_values();
+
+    // Bound only so build_test_graph() callers (and tests) don't have to
+    // hardcode RoadClass's raw uint8 values — not otherwise required by the
+    // router/traffic-model binding work below.
+    py::enum_<RoadClass>(m, "RoadClass")
+        .value("Motorway",      RoadClass::Motorway)
+        .value("MotorwayLink",  RoadClass::MotorwayLink)
+        .value("Trunk",         RoadClass::Trunk)
+        .value("TrunkLink",     RoadClass::TrunkLink)
+        .value("Primary",       RoadClass::Primary)
+        .value("PrimaryLink",   RoadClass::PrimaryLink)
+        .value("Secondary",     RoadClass::Secondary)
+        .value("SecondaryLink", RoadClass::SecondaryLink)
+        .value("Tertiary",      RoadClass::Tertiary)
+        .value("TertiaryLink",  RoadClass::TertiaryLink)
+        .value("Residential",   RoadClass::Residential)
+        .value("LivingStreet",  RoadClass::LivingStreet)
+        .value("Service",       RoadClass::Service)
+        .value("Unclassified",  RoadClass::Unclassified)
+        .value("Track",         RoadClass::Track)
+        .value("Cycleway",      RoadClass::Cycleway)
+        .value("Footway",       RoadClass::Footway)
+        .value("Path",          RoadClass::Path)
+        .value("Steps",         RoadClass::Steps)
+        .value("Unknown",       RoadClass::Unknown)
         .export_values();
 
     // ── Graph ─────────────────────────────────────────────────────────────────
@@ -166,7 +217,15 @@ PYBIND11_MODULE(_nomad_core, m) {
         }, py::arg("path"), "Save graph to binary cache file.")
         .def_static("load", [](const std::string& path) {
             return std::make_shared<Graph>(Graph::load(path));
-        }, py::arg("path"), "Load graph from binary cache file.");
+        }, py::arg("path"), "Load graph from binary cache file.")
+        .def("mode_free_flow_time", &Graph::mode_free_flow_time,
+             py::arg("edge_id"), py::arg("mode"), py::arg("walk_speed_ms") = 1.39f,
+             py::arg("bike_speed_ms") = 4.17f,
+             "Deterministic per-edge travel time [s] for a mode (car/transit: "
+             "edge's own free-flow speed; walk/bike: capped at the mode's own "
+             "pace) — walk/bike never experience congestion (no ped/bike "
+             "traffic model), so this IS their real travel time, not an "
+             "estimate. See include/nomad/core/graph.hpp for the exact formula.");
 
     // ── OsmLoader ─────────────────────────────────────────────────────────────
     py::class_<OsmLoader>(m, "OsmLoader")
@@ -244,17 +303,119 @@ PYBIND11_MODULE(_nomad_core, m) {
             py::arg("peak_mean_s")  = 28800.0f,
             py::arg("seed")         = 42);
 
+    // ── Routing ───────────────────────────────────────────────────────────────
+    // RoutingRequest/Route: plain data structs (router.hpp). Bound so a route
+    // (and its total time) can be computed directly from Python WITHOUT
+    // running a full Simulation — the only viable way to get walk/bike
+    // per-edge timing cheaply, since those modes never reroute (no
+    // congestion feedback) and their pre-computed route IS their real path
+    // for the whole trip (see RouteStore in simulation.hpp: routes_ is
+    // populated once at generation and never cleared per-agent).
+    py::class_<RoutingRequest>(m, "RoutingRequest")
+        .def(py::init([](NodeId origin, NodeId destination, SimTime departure_time, AgentMode mode) {
+            return RoutingRequest{origin, destination, departure_time, mode};
+        }), py::arg("origin"), py::arg("destination"), py::arg("departure_time") = 0.0,
+            py::arg("mode") = AgentMode::Car)
+        .def_readwrite("origin", &RoutingRequest::origin)
+        .def_readwrite("destination", &RoutingRequest::destination)
+        .def_readwrite("departure_time", &RoutingRequest::departure_time)
+        .def_readwrite("mode", &RoutingRequest::mode);
+
+    py::class_<Route>(m, "Route")
+        .def_readonly("edges", &Route::edges)
+        .def_readonly("estimated_time_s", &Route::estimated_time_s)
+        .def_readonly("estimated_dist_m", &Route::estimated_dist_m)
+        .def_readonly("is_valid", &Route::is_valid);
+
+    // Base class registered first (required for the unique_ptr<IRouter>
+    // up-cast used by Simulation::set_router below). No constructor: IRouter
+    // is abstract.
+    //
+    // py::smart_holder (not the default std::unique_ptr holder): pybind11 3.x
+    // requires it for any class passed as `std::unique_ptr<Base>` from Python
+    // into a C++ function that takes ownership (Simulation::set_router/
+    // set_traffic_model) — without it, pybind11 raises at call time:
+    // "Passing std::unique_ptr<T> from Python to C++ requires
+    // py::class_<T, py::smart_holder>". Confirmed by trial: switching these
+    // six classes to py::smart_holder is what made tests/python/
+    // test_multimodal_bindings.py pass.
+    py::class_<IRouter, py::smart_holder>(m, "IRouter")
+        .def("route", &IRouter::route, py::arg("request"),
+             "Compute a single route (blocking, single-threaded query) — "
+             "works on both AStarRouter and CHRouter (CH ignores mode).");
+
+    py::class_<AStarRouter, IRouter, py::smart_holder>(m, "AStarRouter")
+        .def(py::init([](std::shared_ptr<Graph> g) {
+            return std::make_unique<AStarRouter>(*g);
+        }), py::arg("graph"), py::keep_alive<1, 2>(),
+            "Mode-aware router (car/walk/bike): filters edges per mode via "
+            "road_class_accessible and caps effective speed at the mode's own "
+            "pace. Required for any scenario using non-car modes — CHRouter "
+            "ignores AgentMode at query time (see CHRouter docs).")
+        .def_property_readonly("name", &AStarRouter::router_name);
+
+    py::class_<CHRouter, IRouter, py::smart_holder>(m, "CHRouter")
+        .def(py::init([](std::shared_ptr<Graph> g) {
+            return std::make_unique<CHRouter>(*g);
+        }), py::arg("graph"), py::keep_alive<1, 2>(),
+            "Contraction Hierarchies router: ~1000x faster car-only queries. "
+            "Ignores AgentMode at query time (routes are always car-optimal) "
+            "— do not use for scenarios with walk/bike agents. Call "
+            "preprocess() once before routing.")
+        .def("preprocess", &CHRouter::preprocess,
+             "Offline contraction step; required once before this router can "
+             "answer queries (unless loaded from a cache via load()).")
+        .def_property_readonly("is_preprocessed", &CHRouter::is_preprocessed)
+        .def_property_readonly("name", &CHRouter::router_name);
+
+    // ── Traffic models ────────────────────────────────────────────────────────
+    py::class_<ITrafficModel, py::smart_holder>(m, "ITrafficModel");
+
+    py::class_<QueueTrafficModel, ITrafficModel, py::smart_holder>(m, "QueueTrafficModel")
+        .def(py::init([](std::shared_ptr<Graph> g) {
+            return std::make_unique<QueueTrafficModel>(*g);
+        }), py::arg("graph"), py::keep_alive<1, 2>(),
+            "BPR volume-delay queue model (default, fastest). Only "
+            "AgentMode.Car interacts with it — walk/bike agents never touch "
+            "link occupancy/inflow/outflow (see Simulation.link_states docs).")
+        .def_property_readonly("name", &QueueTrafficModel::model_name);
+
+    py::class_<LtmTrafficModel, ITrafficModel, py::smart_holder>(m, "LtmTrafficModel")
+        .def(py::init([](std::shared_ptr<Graph> g) {
+            return std::make_unique<LtmTrafficModel>(*g);
+        }), py::arg("graph"), py::keep_alive<1, 2>(),
+            "Single-cell CTM-lite traffic model with real spillback. Same "
+            "car-only interaction caveat as QueueTrafficModel.")
+        .def_property_readonly("name", &LtmTrafficModel::model_name);
+
     // ── Simulation ────────────────────────────────────────────────────────────
     py::class_<Simulation>(m, "Simulation")
         .def(py::init<SimulationConfig>(), py::arg("config") = SimulationConfig{})
         .def("set_graph",   [](Simulation& s, std::shared_ptr<Graph> g) { s.set_graph(g); })
         .def("set_demand",  [](Simulation& s, std::shared_ptr<IDemandModel> d) { s.set_demand(d); })
-        .def("run",         &Simulation::run,
-             py::call_guard<py::gil_scoped_release>())
-        .def("run_until",   &Simulation::run_until,
-             py::arg("time"), py::call_guard<py::gil_scoped_release>())
-        .def("step",        &Simulation::step,
-             py::call_guard<py::gil_scoped_release>())
+        .def("set_router",         &Simulation::set_router, py::arg("router"),
+             "Attach an AStarRouter or CHRouter. Mandatory before run()/"
+             "run_until()/step() — see require_ready in this file.")
+        .def("set_traffic_model",  &Simulation::set_traffic_model, py::arg("traffic_model"),
+             "Attach a QueueTrafficModel or LtmTrafficModel. Mandatory before "
+             "run()/run_until()/step().")
+        .def_property_readonly("has_router",        &Simulation::has_router)
+        .def_property_readonly("has_traffic_model", &Simulation::has_traffic_model)
+        .def("run", [](Simulation& s) {
+            require_ready(s);
+            py::gil_scoped_release release;
+            s.run();
+        })
+        .def("run_until", [](Simulation& s, SimTime t) {
+            require_ready(s);
+            py::gil_scoped_release release;
+            s.run_until(t);
+        }, py::arg("time"))
+        .def("step", [](Simulation& s) {
+            require_ready(s);
+            py::gil_scoped_release release;
+            s.step();
+        })
         .def("current_time",   &Simulation::current_time)
         .def("active_agents",  &Simulation::active_agents)
         .def("events_processed", &Simulation::events_processed)
@@ -300,6 +461,65 @@ PYBIND11_MODULE(_nomad_core, m) {
             s.add_output_writer(
                 std::make_unique<GeoJsonWriter>(output_dir, interval));
         }, py::arg("output_dir"), py::arg("snapshot_interval_s") = 300.0f);
+
+    // ── Test-only synthetic Graph builder ─────────────────────────────────────
+    // Graph has no other Python-visible constructor (OsmLoader.load_and_clean
+    // or Graph.load(cache) are the only ways to get one) — this exists purely
+    // so small artificial networks can be unit-tested from Python without a
+    // real .osm.pbf file. Real cities must still go through OsmLoader.
+    m.def("build_test_graph", [](
+              const std::vector<std::tuple<uint32_t, uint32_t, float, float, float, uint8_t>>& directed_edges,
+              uint32_t num_nodes) {
+        // Each tuple: (from_node, to_node, length_m, free_flow_speed_ms,
+        // capacity_veh_h, road_class). Order is arbitrary — sorted by
+        // from_node here to build the CSR (Graph::row_ptr/col_idx).
+        std::vector<size_t> order(directed_edges.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return std::get<0>(directed_edges[a]) < std::get<0>(directed_edges[b]);
+        });
+
+        Graph g;
+        g.nodes.resize(num_nodes);
+        for (uint32_t i = 0; i < num_nodes; ++i) {
+            // Placeholder coordinates spaced ~111m apart (0.001 deg longitude)
+            // — only used for A*'s haversine heuristic; keep test edge
+            // lengths on a comparable scale (hundreds of meters) so the
+            // heuristic stays admissible (haversine <= true route cost).
+            g.nodes[i].lon = static_cast<float>(i) * 0.001f;
+            g.nodes[i].lat = 0.0f;
+        }
+        g.row_ptr.assign(num_nodes + 1, 0);
+        for (auto idx : order) {
+            uint32_t from = std::get<0>(directed_edges[idx]);
+            if (from >= num_nodes)
+                throw py::value_error("edge from_node out of range for num_nodes");
+            ++g.row_ptr[from + 1];
+        }
+        for (uint32_t i = 0; i < num_nodes; ++i) g.row_ptr[i + 1] += g.row_ptr[i];
+
+        g.edges.resize(directed_edges.size());
+        g.col_idx.resize(directed_edges.size());
+        for (size_t k = 0; k < order.size(); ++k) {
+            const auto& [from, to, len, speed, cap, rc] = directed_edges[order[k]];
+            (void)from;
+            if (to >= num_nodes)
+                throw py::value_error("edge to_node out of range for num_nodes");
+            EdgeData ed{};
+            ed.target          = to;
+            ed.length_m        = len;
+            ed.free_flow_speed = speed;
+            ed.capacity        = cap;
+            ed.road_class      = rc;
+            g.edges[k]   = ed;
+            g.col_idx[k] = static_cast<EdgeId>(k);
+        }
+        g.geom_ptr.assign(g.edges.size() + 1, 0);
+        return std::make_shared<Graph>(std::move(g));
+    }, py::arg("edges"), py::arg("num_nodes"),
+    "Build a tiny in-memory Graph for tests from an explicit directed-edge "
+    "list of (from_node, to_node, length_m, free_flow_speed_ms, "
+    "capacity_veh_h, road_class) tuples. Test/synthetic-network use only.");
 
     // ── Route cache diagnostics ───────────────────────────────────────────────
     py::class_<RouteCache>(m, "RouteCache")
