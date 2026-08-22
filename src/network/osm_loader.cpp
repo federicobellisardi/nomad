@@ -448,10 +448,26 @@ Graph OsmLoader::build_graph(
         ed.target          = node_map.at(re.to_node);
         ed.length_m        = re.length_m;
         ed.free_flow_speed = re.speed_ms;
-        ed.capacity        = re.capacity;
         ed.road_class      = re.road_class;
         ed.flags           = re.flags;
         ed.way_meta_idx    = re.way_meta_idx;
+
+        // Intersection capacity derating (HCM/TCQSM, see intersection.hpp) --
+        // applied per effective_capacity()'s own doc comment ("at the edge's
+        // source node"): a signal/stop/roundabout at the node this edge
+        // LEAVES FROM constrains how much of re.capacity's mid-block
+        // throughput actually gets discharged onto it. Nodes with no
+        // intersection metadata (the common case -- only traffic_signals/
+        // stop/give_way/mini_roundabout tagged nodes are recorded) fall
+        // through to effective_capacity()'s IntersectionType::Simple default,
+        // which returns base_capacity unchanged.
+        float capacity = re.capacity;
+        if (auto it = intersections_.find(re.from_node); it != intersections_.end()) {
+            const SignalPhase* phase =
+                it->second.phases.empty() ? nullptr : &it->second.phases[0];
+            capacity = effective_capacity(capacity, it->second.type, phase);
+        }
+        ed.capacity = capacity;
 
         // Geometry: no intermediate points at segment level (polyline points
         // are represented by consecutive edges), so geom_ptr[eid] = eid offset.
