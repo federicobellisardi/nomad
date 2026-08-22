@@ -6,6 +6,7 @@ add_executable(nomad_tests
     unit/test_agent_store.cpp
     unit/test_od_matrix.cpp
     unit/test_network_cleaner.cpp
+    unit/test_intersection.cpp
     integration/test_simulation_synthetic.cpp
 )
 
