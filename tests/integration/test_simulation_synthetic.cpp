@@ -469,3 +469,132 @@ TEST_CASE("Simulation: exit-link gate keeps shared downstream edge within storag
 
     fs::remove(od_path);
 }
+
+// ── Diamond: two parallel 0→3 paths of very different character ─────────────
+// Fast-but-fragile: 0--A-->1--B-->3, short (5s ff each), low capacity
+// (storage_veh ≈ 6.67, same floor as make_small_storage_edge) -- always the
+// free-flow-optimal choice, so pre-routing (before any traffic exists)
+// always picks it for every agent regardless of what happens later.
+// Slow-but-safe: 0--C-->2--D-->3, long (50s ff each), generous capacity --
+// never saturates, but is a worse choice under free-flow costs alone.
+// Edge IDs are deterministic by build order: A=0 (0→1), B=1 (1→3), C=2
+// (0→2), D=3 (2→3).
+static Graph make_diamond() {
+    Graph g;
+    g.nodes.resize(4);
+    g.nodes[0] = {0.0f, 0.0f, 0, 0, 0, 0};
+    g.nodes[1] = {1.0f, 0.0f, 0, 0, 0, 1};
+    g.nodes[2] = {0.0f, 1.0f, 0, 0, 0, 2};
+    g.nodes[3] = {1.0f, 1.0f, 0, 0, 0, 3};
+    // node 0 has 2 out-edges (A, C); node 1 has 1 (B); node 2 has 1 (D); node 3 has 0.
+    g.row_ptr = {0, 2, 3, 4, 4};
+    g.col_idx = {0, 2, 1, 3};  // CSR pos -> EdgeId, per node's out-edges above
+    g.edges.resize(4);
+
+    EdgeData a{};
+    a.target = 1; a.length_m = 50.0f; a.free_flow_speed = 10.0f; a.capacity = 5.0f;
+    a.road_class = static_cast<uint8_t>(RoadClass::Primary);
+    g.edges[0] = a;
+
+    EdgeData b{};
+    b.target = 3; b.length_m = 50.0f; b.free_flow_speed = 10.0f; b.capacity = 1600.0f;
+    b.road_class = static_cast<uint8_t>(RoadClass::Primary);
+    g.edges[1] = b;
+
+    EdgeData c{};
+    c.target = 2; c.length_m = 500.0f; c.free_flow_speed = 10.0f; c.capacity = 10000.0f;
+    c.road_class = static_cast<uint8_t>(RoadClass::Primary);
+    g.edges[2] = c;
+
+    EdgeData d{};
+    d.target = 3; d.length_m = 500.0f; d.free_flow_speed = 10.0f; d.capacity = 10000.0f;
+    d.road_class = static_cast<uint8_t>(RoadClass::Primary);
+    g.edges[3] = d;
+
+    g.geom_ptr.assign(5, 0);
+    return g;
+}
+
+// Runs the diamond scenario once with the given enable_pretrip_reroute
+// setting; returns the first edge of the STORED route for the late agent
+// (id 100) after the run. Edge A is deliberately congested heavily enough
+// that agent 100 (departing well after 100 other agents already competing
+// for the same tiny storage_veh) may never actually win a has_capacity()
+// slot within this test's runtime -- checking the stored route directly
+// (rather than waiting for an actual AgentEnterLink) sidesteps that
+// entirely, and is safe here specifically because an agent that hasn't
+// entered any edge yet cannot have been mid-trip-rerouted (that path only
+// ever fires for AgentState::OnLink agents).
+static EdgeId run_diamond_and_capture_late_agent_first_edge(bool enable_pretrip_reroute) {
+    namespace fs = std::filesystem;
+    auto graph = std::make_shared<Graph>(make_diamond());
+
+    SimulationConfig cfg;
+    cfg.start_time            = 0.0;
+    cfg.end_time              = 900.0;
+    cfg.sync_window_s         = 5.0f;
+    cfg.reroute_interval_s    = 10.0f;
+    cfg.num_threads           = 1;
+    cfg.stuck_threshold_ratio = 0.0f;  // isolate the routing mechanism, not the teleport one
+    cfg.stuck_max_hours       = 0.0f;
+    cfg.enable_pretrip_reroute = enable_pretrip_reroute;
+
+    LtmTrafficModel::Config lcfg;
+    lcfg.enable_discharge_cap = true;
+    lcfg.discharge_burst_s    = 1.0f;  // tight: max_credit floors to 1.0
+    auto traffic = std::make_unique<LtmTrafficModel>(*graph, lcfg);
+
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    sim.set_traffic_model(std::move(traffic));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+
+    auto od_path = fs::temp_directory_path() /
+        ("nomad_test_od_diamond_pretrip_" + std::to_string(enable_pretrip_reroute) + ".csv");
+    {
+        std::ofstream f(od_path);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        // Early wave: 100 agents (ids 0..99), departures spread over roughly
+        // [0,150s], sustaining pressure on the low-capacity edge A. The
+        // discharge-gate-wait signal (gate_wait_s) resets to 0 on every
+        // SUCCESSFUL exit (see ltm_model.cpp), so it only ever reflects time
+        // since the LAST successful exit -- an intermittently-draining queue
+        // would make gate_wait_s oscillate and possibly never exceed the
+        // safe path's fixed 100s (path C+D) at the exact instant the late
+        // agent's pretrip check happens to fire. To avoid that timing
+        // sensitivity, capacity=5 veh/h -> capacity_veh_s ≈ 0.00139/s ->
+        // refill to the 1.0 credit floor (discharge_burst_s=1.0) takes
+        // ~720s once the initial free credit is spent by the very first
+        // exit -- i.e. gate_wait_s grows MONOTONICALLY, uninterrupted, from
+        // shortly after t=0 all the way past t=400 (the late agent's
+        // departure), guaranteed to comfortably exceed 100s by then.
+        f << "0,3,100,car,50,40\n";
+        // Late agent (id 100): scheduled well after the wave has saturated
+        // edge A, while it is still draining.
+        f << "0,3,1,car,400,1\n";
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(
+        OdMatrixDemand::from_csv(od_path)));
+
+    constexpr AgentId kLateAgent = 100;
+
+    sim.run();
+
+    REQUIRE(sim.agent_hot().pretrip_rerouted[kLateAgent] == (enable_pretrip_reroute ? 1 : 0));
+    REQUIRE(sim.agent_hot().reroute_count[kLateAgent] == 0);  // no post-departure confound
+
+    auto route = sim.route_store().get_route(kLateAgent);
+    REQUIRE_FALSE(route.empty());
+
+    fs::remove(od_path);
+    return route.front();
+}
+
+TEST_CASE("Simulation: pre-trip reroute diverts a later-departing agent around "
+          "congestion caused by an earlier wave", "[integration]") {
+    EdgeId control_first_edge   = run_diamond_and_capture_late_agent_first_edge(false);
+    EdgeId treatment_first_edge = run_diamond_and_capture_late_agent_first_edge(true);
+
+    REQUIRE(control_first_edge == 0);    // edge A: stale free-flow route, unchanged
+    REQUIRE(treatment_first_edge == 2);  // edge C: diverted onto the safe path
+}

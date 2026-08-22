@@ -34,6 +34,10 @@ struct AgentHotStore {
     std::vector<uint16_t>   route_pos;        // position within compressed route
     std::vector<float>      freeflow_route_s; // pre-computed free-flow route time [s]
     std::vector<uint8_t>    reroute_count;    // number of times this agent has been rerouted
+    // Whether this agent already received a pre-trip route refresh (see
+    // Simulation::schedule_pretrip_reroutes()) -- separate from
+    // reroute_count, which tracks only mid-trip (post-departure) reroutes.
+    std::vector<uint8_t>    pretrip_rerouted;
 
     std::size_t size() const noexcept { return current_edge.size(); }
 
@@ -47,6 +51,7 @@ struct AgentHotStore {
         route_pos         .push_back(rpos);
         freeflow_route_s  .push_back(0.0f);
         reroute_count     .push_back(0);
+        pretrip_rerouted  .push_back(0);
     }
 
     void resize(std::size_t n) {
@@ -58,6 +63,7 @@ struct AgentHotStore {
         route_pos         .resize(n, 0);
         freeflow_route_s  .resize(n, 0.0f);
         reroute_count     .resize(n, 0);
+        pretrip_rerouted  .resize(n, 0);
     }
 };
 

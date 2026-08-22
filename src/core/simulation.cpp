@@ -7,6 +7,7 @@
 #include <nomad/demand/demand_model.hpp>
 #include <nomad/output/writer.hpp>
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -61,6 +62,26 @@ void Simulation::inject_demand() {
     spdlog::info("Simulation: {} agents injected", n);
 
     if (!router_ || n == 0) return;
+
+    // Build the pre-trip-reroute departure-order index once, up front (see
+    // schedule_pretrip_reroutes()) -- O(n log n), trivial next to the
+    // pre-routing pass below. Sorted by each agent's own scheduled
+    // departure time, which cold_.plans never mutates afterwards, so a
+    // monotonic cursor can walk this exactly once as `now` advances instead
+    // of re-scanning all agents every reroute cycle.
+    if (cfg_.enable_pretrip_reroute) {
+        pretrip_depart_order_.clear();
+        pretrip_depart_order_.reserve(n);
+        for (AgentId a = 0; a < static_cast<AgentId>(n); ++a)
+            if (cold_.plans[a].activities.size() >= 2)
+                pretrip_depart_order_.push_back(a);
+        std::sort(pretrip_depart_order_.begin(), pretrip_depart_order_.end(),
+            [&](AgentId x, AgentId y) {
+                return cold_.plans[x].activities[0].start_time
+                     < cold_.plans[y].activities[0].start_time;
+            });
+        pretrip_cursor_ = 0;
+    }
 
     // ── Pre-routing: compute all routes before the simulation loop starts ─────
     // Parallel phase: AStarRouter.route() is thread-safe (per-thread TLS).
@@ -505,19 +526,23 @@ void Simulation::schedule_reroutes() {
     // Update CH cost table so future departures see updated costs.
     if (router_) router_->update_costs(congested_vec);
 
-    IRouter* r_ptr = reroute_router_ ? static_cast<IRouter*>(reroute_router_.get())
-                                     : router_.get();
-    if (!r_ptr) return;
+    if (!reroute_router_ && !router_) return;
 
-    // 2. Collect agents whose upcoming route crosses a congested link.
-    //    Skip agents that have already been rerouted max_reroutes times —
-    //    repeated rerouting of the same agent causes route oscillation (routing loop).
+    // 2. Collect agents whose upcoming route crosses a congested link, and
+    //    build their reroute request right here (cheap array lookups) --
+    //    the expensive part (the actual route() call) happens in parallel
+    //    inside apply_reroute_batch(). Skip agents that have already been
+    //    rerouted max_reroutes times — repeated rerouting of the same agent
+    //    causes route oscillation (routing loop).
     const uint32_t N = static_cast<uint32_t>(hot_.size());
     std::vector<AgentId> to_reroute;
+    std::vector<RoutingRequest> reqs;
     to_reroute.reserve(std::min<uint32_t>(N, 65536u));
+    reqs.reserve(std::min<uint32_t>(N, 65536u));
     for (AgentId a = 0; a < N; ++a) {
         if (hot_.state[a] != AgentState::OnLink) continue;
         if (cfg_.max_reroutes > 0 && hot_.reroute_count[a] >= cfg_.max_reroutes) continue;
+        if (cold_.plans[a].activities.size() < 2) continue;
         auto route    = routes_.get_route(a);
         uint16_t pos  = hot_.route_pos[a];
         // Scan the whole remaining route, not just a handful of edges ahead:
@@ -532,56 +557,120 @@ void Simulation::schedule_reroutes() {
             std::min<std::size_t>(route.size(), pos + 1 + kMaxScan));
         for (uint32_t k = pos + 1; k < scan_end; ++k) {
             if (congested_set.count(route[k])) {
+                EdgeId cur = hot_.current_edge[a];
+                if (cur >= graph_->num_edges()) break;
+                NodeId from = graph_->edges[cur].target;
+                NodeId dest = cold_.plans[a].activities.back().location;
                 to_reroute.push_back(a);
+                reqs.push_back(RoutingRequest{from, dest, now, hot_.mode[a]});
                 break;
             }
         }
     }
 
-    if (to_reroute.empty()) return;
-
-    // 3. Compute new routes in parallel.
-    //    A* (reroute_router_) is thread-safe: each thread uses its own workspace.
-    //    hot_ and cold_ are read-only here (no events processing concurrently).
-    std::vector<Route> new_routes(to_reroute.size());
-    impl_->arena.execute([&] {
-        tbb::parallel_for(
-            tbb::blocked_range<std::size_t>(0, to_reroute.size(), 32),
-            [&](const tbb::blocked_range<std::size_t>& rng) {
-                for (std::size_t i = rng.begin(); i < rng.end(); ++i) {
-                    AgentId a = to_reroute[i];
-                    if (cold_.plans[a].activities.size() < 2) continue;
-                    EdgeId cur = hot_.current_edge[a];
-                    if (cur >= graph_->num_edges()) continue;
-                    NodeId from = graph_->edges[cur].target;
-                    NodeId dest = cold_.plans[a].activities.back().location;
-                    RoutingRequest req{from, dest, now, hot_.mode[a]};
-                    new_routes[i] = r_ptr->route(req);
-                }
-            });
-    });
-
-    // 4. Apply results sequentially (RouteStore::replace_suffix writes to shared
-    //    flat_data — not thread-safe for concurrent agents).
-    std::size_t n_applied = 0;
-    for (std::size_t i = 0; i < to_reroute.size(); ++i) {
-        AgentId a = to_reroute[i];
-        if (new_routes[i].is_valid && !new_routes[i].edges.empty()) {
-            routes_.replace_suffix(a, hot_.route_pos[a], new_routes[i].edges);
-            // Keep freeflow_route_s in sync with the rerouted path.
-            auto full = routes_.get_route(a);
-            float ff = 0;
-            for (EdgeId eid : full)
-                if (eid < graph_->num_edges())
-                    ff += graph_->free_flow_time(eid);
-            hot_.freeflow_route_s[a] = ff;
-            ++hot_.reroute_count[a];
-            ++n_applied;
-        }
-    }
+    std::size_t n_applied = apply_reroute_batch(to_reroute, reqs, /*counts_toward_budget=*/true);
 
     spdlog::debug("schedule_reroutes t={:.0f}: {} congested links, {}/{} agents rerouted",
                   now, congested_vec.size(), n_applied, to_reroute.size());
+}
+
+std::size_t Simulation::apply_reroute_batch(const std::vector<AgentId>& agents,
+                                             const std::vector<RoutingRequest>& reqs,
+                                             bool counts_toward_budget) {
+    if (agents.empty()) return 0;
+    IRouter* r_ptr = reroute_router_ ? static_cast<IRouter*>(reroute_router_.get())
+                                     : router_.get();
+    if (!r_ptr) return 0;
+
+    // 1. Compute new routes in parallel. A* (reroute_router_) is thread-safe:
+    //    each thread uses its own workspace. hot_/cold_/graph_ are read-only
+    //    here (no events processing concurrently — called only from
+    //    run_until()'s between-batch point, not from inside handle_event()).
+    std::vector<Route> new_routes(agents.size());
+    impl_->arena.execute([&] {
+        tbb::parallel_for(
+            tbb::blocked_range<std::size_t>(0, agents.size(), 32),
+            [&](const tbb::blocked_range<std::size_t>& rng) {
+                for (std::size_t i = rng.begin(); i < rng.end(); ++i)
+                    new_routes[i] = r_ptr->route(reqs[i]);
+            });
+    });
+
+    // 2. Apply results sequentially. RouteStore::replace_suffix operates on a
+    //    per-agent vector<vector<EdgeId>> (not a shared flat buffer) — the
+    //    only real hazard would be concurrent resize() across agents, not
+    //    relevant to this strictly sequential write-back loop.
+    std::size_t n_applied = 0;
+    for (std::size_t i = 0; i < agents.size(); ++i) {
+        AgentId a = agents[i];
+        if (!new_routes[i].is_valid || new_routes[i].edges.empty()) continue;
+        // Mid-trip reroute (OnLink) replaces only the remaining suffix from
+        // the agent's current position; pre-trip reroute (not yet departed)
+        // replaces the whole route from scratch (from_pos=0) — see
+        // schedule_pretrip_reroutes().
+        uint16_t from_pos = counts_toward_budget ? hot_.route_pos[a] : uint16_t{0};
+        routes_.replace_suffix(a, from_pos, new_routes[i].edges);
+        // Keep freeflow_route_s in sync with the (re)routed path so the
+        // stuck-agent teleport threshold (ratio × freeflow_route_s) is never
+        // exceeded by a longer but legitimate detour.
+        auto full = routes_.get_route(a);
+        float ff = 0;
+        for (EdgeId eid : full)
+            if (eid < graph_->num_edges())
+                ff += graph_->mode_free_flow_time(eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
+        hot_.freeflow_route_s[a] = ff;
+        if (counts_toward_budget) {
+            ++hot_.reroute_count[a];
+        } else {
+            hot_.pretrip_rerouted[a] = 1;
+            ++n_pretrip_rerouted_;
+        }
+        ++n_applied;
+    }
+    return n_applied;
+}
+
+void Simulation::schedule_pretrip_reroutes() {
+    if (!cfg_.enable_pretrip_reroute || !traffic_ || !graph_) return;
+    if (!reroute_router_ && !router_) return;
+
+    SimTime now = current_time_.load();
+    if (now - last_pretrip_reroute_t_ < cfg_.reroute_interval_s) return;
+    last_pretrip_reroute_t_ = now;
+
+    // Walk the monotonic cursor through agents in departure-time order,
+    // rescuing every still-Waiting car agent whose scheduled departure falls
+    // before the next scan (now + reroute_interval_s) with a fresh,
+    // congestion-aware route — before they ever depart on the stale
+    // free-flow-only route computed at pre-routing time. Unconditional (no
+    // congested-edge filter, unlike the OnLink path in schedule_reroutes()):
+    // total pretrip route computations over a full day are the same order of
+    // magnitude as the existing pre-routing pass either way, so filtering
+    // buys little while risking under-serving exactly the agents this exists
+    // to help. Always advance the cursor, even for an agent that turns out
+    // not to be Waiting/car anymore (e.g. rejected-and-retried past its own
+    // window is not re-caught here — a documented v1 simplification, see the
+    // plan file) — every agent is visited exactly once.
+    std::vector<AgentId> to_reroute;
+    std::vector<RoutingRequest> reqs;
+    SimTime horizon = now + cfg_.reroute_interval_s;
+    while (pretrip_cursor_ < pretrip_depart_order_.size()) {
+        AgentId a = pretrip_depart_order_[pretrip_cursor_];
+        SimTime dep = cold_.plans[a].activities[0].start_time;
+        if (dep >= horizon) break;
+        if (hot_.state[a] == AgentState::Waiting && hot_.mode[a] == AgentMode::Car) {
+            NodeId origin = cold_.plans[a].activities[0].location;
+            NodeId dest   = cold_.plans[a].activities.back().location;
+            to_reroute.push_back(a);
+            reqs.push_back(RoutingRequest{origin, dest, now, hot_.mode[a]});
+        }
+        ++pretrip_cursor_;
+    }
+
+    std::size_t n_applied = apply_reroute_batch(to_reroute, reqs, /*counts_toward_budget=*/false);
+
+    spdlog::debug("schedule_pretrip_reroutes t={:.0f}: {}/{} waiting agents rerouted",
+                  now, n_applied, to_reroute.size());
 }
 
 void Simulation::run() { run_until(cfg_.end_time); }
@@ -635,6 +724,7 @@ void Simulation::run_until(SimTime until) {
 
         flush_traffic_state();
         schedule_reroutes();
+        schedule_pretrip_reroutes();
         teleport_stuck_agents(wend);
         current_time_.store(wend);
     }
@@ -661,9 +751,9 @@ void Simulation::run_until(SimTime until) {
         }
     }
 
-    spdlog::info("Event types: Depart={} Enter={} Exit={} Arrive={} Teleported={} DepartRejected={}",
+    spdlog::info("Event types: Depart={} Enter={} Exit={} Arrive={} Teleported={} DepartRejected={} PretripRerouted={}",
         n_depart_.load(), n_enter_.load(), n_exit_.load(), n_arrive_.load(),
-        n_teleported_.load(), n_depart_rejected_.load());
+        n_teleported_.load(), n_depart_rejected_.load(), n_pretrip_rerouted_.load());
     spdlog::info("Final states: Waiting={} OnLink={} AtActivity={} Arrived={}",
         n_waiting, n_onlink, n_atact, n_arrived);
     spdlog::info("Queue remaining: {} events | Slow edges (ff>1h): {}",
