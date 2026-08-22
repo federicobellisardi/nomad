@@ -66,6 +66,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.simulation.stuck_threshold_ratio = s.value("stuck_threshold_ratio", cfg.simulation.stuck_threshold_ratio);
         cfg.simulation.teleport_interval_s   = s.value("teleport_interval_s",   cfg.simulation.teleport_interval_s);
         cfg.simulation.max_reroutes          = s.value("max_reroutes",          cfg.simulation.max_reroutes);
+        cfg.simulation.enable_pretrip_reroute = s.value("enable_pretrip_reroute", cfg.simulation.enable_pretrip_reroute);
         cfg.simulation.stuck_max_hours       = s.value("stuck_max_hours",       cfg.simulation.stuck_max_hours);
         cfg.simulation.num_threads           = s.value("num_threads",           cfg.simulation.num_threads);
         cfg.simulation.store_traces  = s.value("store_traces", cfg.simulation.store_traces);
@@ -217,6 +218,7 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["simulation"]["sync_window_s"]      = cfg.simulation.sync_window_s;
     j["simulation"]["reroute_thresh"]     = cfg.simulation.reroute_thresh;
     j["simulation"]["reroute_interval_s"] = cfg.simulation.reroute_interval_s;
+    j["simulation"]["enable_pretrip_reroute"] = cfg.simulation.enable_pretrip_reroute;
     j["simulation"]["num_threads"]        = cfg.simulation.num_threads;
     j["simulation"]["store_traces"]       = cfg.simulation.store_traces;
     j["simulation"]["traffic_model"]      = cfg.simulation.traffic_model;

@@ -4,6 +4,7 @@
 #include <nomad/core/event.hpp>
 #include <nomad/core/graph.hpp>
 #include <nomad/core/types.hpp>
+#include <nomad/routing/router.hpp>  // RoutingRequest, used by apply_reroute_batch()
 
 #include <array>
 #include <atomic>
@@ -34,6 +35,14 @@ struct SimulationConfig {
     float    stuck_threshold_ratio      = 20.0f;  // teleport if elapsed > ratio × freeflow_route (0 = disabled)
     float    teleport_interval_s        = 600.0f; // minimum simulated seconds between teleport scans
     uint32_t max_reroutes               = 10;     // stop rerouting an agent after this many reroutes (0 = unlimited)
+    // Give every car agent still Waiting a fresh, congestion-aware route
+    // shortly before its own scheduled departure (see
+    // schedule_pretrip_reroutes()) -- opt-in, default off, byte-identical
+    // behaviour when disabled. Without this, every agent departs on the
+    // route computed once at pre-routing time (free-flow costs only, no
+    // traffic exists yet) and can walk straight into congestion that formed
+    // hours earlier with zero foreknowledge.
+    bool     enable_pretrip_reroute     = false;
     float    stuck_max_hours            = 4.0f;   // hard cap: teleport after this many hours regardless of route length (0 = disabled)
     float    route_randomization_sigma  = 0.0f;   // logNormal sigma for stochastic pre-routing (0 = CH only)
     float    walk_speed_ms       = 1.39f;  // propagated from ScenarioConfig::mode_choice
@@ -114,6 +123,27 @@ private:
     void schedule_signal_changes    ();
     void flush_traffic_state        ();
     void schedule_reroutes          ();
+    // Gives Waiting car agents whose scheduled departure falls within the
+    // upcoming [now, now+reroute_interval_s) window a fresh route computed
+    // with CURRENT traffic costs, before they ever depart on a stale
+    // free-flow-only route. Own cadence state (last_pretrip_reroute_t_),
+    // deliberately decoupled from schedule_reroutes()'s -- the two triggers
+    // are different (time-window vs congestion-signal) and share only the
+    // route-computation/write-back mechanics, factored into
+    // apply_reroute_batch(). No-op unless cfg_.enable_pretrip_reroute.
+    void schedule_pretrip_reroutes  ();
+    // Shared by schedule_reroutes() and schedule_pretrip_reroutes(): computes
+    // `reqs` in parallel via reroute_router_, then sequentially applies each
+    // valid result via routes_.replace_suffix() and resyncs
+    // freeflow_route_s. `counts_toward_budget`: increments
+    // hot_.reroute_count[a] (mid-trip path) when true; when false (pre-trip
+    // path) increments hot_.pretrip_rerouted[a] instead and leaves
+    // reroute_count untouched, so a pre-departure route refresh never eats
+    // into an agent's post-departure reroute allowance. Returns the number
+    // of agents actually rerouted.
+    std::size_t apply_reroute_batch (const std::vector<AgentId>& agents,
+                                      const std::vector<RoutingRequest>& reqs,
+                                      bool counts_toward_budget);
     void teleport_stuck_agents      (SimTime now);
     void fire_hooks                 (EventType type, const Event& e);
 
@@ -153,6 +183,17 @@ private:
 
     SimTime last_reroute_t_{-1e9f};
     SimTime last_teleport_t_{-1e9f};
+
+    // schedule_pretrip_reroutes() state -- built once (inject_demand()) when
+    // cfg_.enable_pretrip_reroute is set: agent indices sorted by their own
+    // scheduled departure time (cold_.plans[a].activities[0].start_time,
+    // never mutated afterwards), plus a monotonic cursor into it. Avoids an
+    // O(N) scan of all agents every reroute cycle -- each agent is visited
+    // exactly once, in departure order, as `now` advances.
+    SimTime               last_pretrip_reroute_t_{-1e9f};
+    std::vector<AgentId>  pretrip_depart_order_;
+    std::size_t           pretrip_cursor_{0};
+    std::atomic<uint64_t> n_pretrip_rerouted_{0};
 
     std::unordered_map<uint8_t, std::vector<std::function<void(const Event&)>>> hooks_;
 
