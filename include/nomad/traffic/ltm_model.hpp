@@ -33,15 +33,29 @@ namespace nomad {
 // link almost always finds the bucket full. Default OFF so existing
 // spillback-only behaviour is unchanged unless explicitly enabled.
 //
-// Discharge-gate wait signal: travel_time_for()'s BPR term is driven by
-// occupancy/storage_veh, which the departure/exit-link capacity gates keep
-// permanently near 1.0 -- so it cannot reflect discharge-rate-limited delay
-// once those gates are working correctly (occupancy simply never builds up
-// enough to move the ratio). Cell::gate_wait_s tracks how long the discharge
-// check has been continuously blocking exits and is added on top of the BPR
-// term (only when enable_discharge_cap is true), giving congestion_ema and
-// current_travel_time() -- and therefore schedule_reroutes() -- a real
-// signal for this specific bottleneck.
+// Exit-gate wait signal: travel_time_for()'s BPR term is driven by
+// occ/storage_veh, but occupancy can PHYSICALLY never exceed storage_veh
+// (on_enter of the next link is refused once it's full) -- so vc = occ/cap
+// saturates at ~1.0 and the BPR term is hard-capped at ff*1.15, no matter
+// how long an edge has sat completely gridlocked at jam density. Confirmed
+// empirically: a Palma corridor edge pinned at ~100% storage occupancy for
+// 16+ continuous hours still reported travel_time_ratio ~1.15 the entire
+// time, because the formula has no other way to express "still full."
+//
+// Cell::gate_wait_s tracks how long the HEAD-OF-QUEUE exit has been
+// continuously blocked, by EITHER cause -- receiving-side spillback
+// (always active, not opt-in: on_exit's `next` has no spare storage) or
+// sending-side discharge-rate exhaustion (opt-in, enable_discharge_cap) --
+// and is added on top of the BPR term unconditionally. What matters for the
+// congestion signal is how long this link's traffic has failed to actually
+// move, not which specific gate is currently binding; spillback is the
+// model's default, always-on blocking behaviour, so the signal for it can't
+// be opt-in either. This gives congestion_ema and current_travel_time() --
+// and therefore schedule_reroutes() -- a real, unbounded-growth signal for
+// genuine gridlock, instead of silently reporting near-free-flow forever.
+//
+// Note this only changes the REPORTED congestion signal (travel_time_for());
+// on_exit()'s bool return and occupancy/spillback mechanics are unchanged.
 //
 // storage_veh and capacity accounting reuse the exact conventions validated
 // in QueueTrafficModel (50m effective-length floor, kJamDensity = 1/7.5) so
