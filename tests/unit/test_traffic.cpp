@@ -324,12 +324,12 @@ TEST_CASE("LtmModel: a successful exit resets gate wait immediately", "[traffic]
     REQUIRE(model.current_travel_time(0) == Catch::Approx(100.0f).epsilon(0.01));
 }
 
-TEST_CASE("LtmModel: gate wait term is additive only when discharge cap is enabled", "[traffic]") {
+TEST_CASE("LtmModel: pure BPR occupancy term matches with/without discharge cap when no exit is ever blocked", "[traffic]") {
     auto g = make_single_edge(1000.0f, 10.0f, 3600.0f);
 
-    // Cap disabled: the discharge-check branch in on_exit() never executes,
-    // so gate_wait_s can never become nonzero -- current_travel_time() must
-    // match the plain BPR-only formula exactly (byte-identical to pre-Phase-4).
+    // No on_exit() call happens in this test at all (only on_enter()), so
+    // gate_wait_s stays 0 in both configs regardless of enable_discharge_cap
+    // -- this isolates and checks the occupancy-driven BPR term alone.
     LtmTrafficModel off_model(g, LtmTrafficModel::Config{});
     for (AgentId a = 0; a < 30; ++a) off_model.on_enter(0, a, 0.0);  // occ=30 (storage_veh=300)
     off_model.update(0.0);
@@ -361,16 +361,72 @@ TEST_CASE("LtmModel: occupancy-driven congestion alone never sets gate wait", "[
     REQUIRE(model.current_travel_time(0) == Catch::Approx(tt).epsilon(0.05));
 }
 
-TEST_CASE("LtmModel: gate-wait fields leave disabled-by-default spillback behavior byte-identical", "[traffic]") {
-    // Re-run the exact disabled-cap spillback scenario from earlier in this
-    // file with the new Cell fields present -- guards against an accidental
-    // unconditional write to gate_block_since/gate_wait_s.
+TEST_CASE("LtmModel: on_exit's bool return and occupancy accounting are unaffected by the exit-gate signal fix", "[traffic]") {
+    // Re-run the exact disabled-cap, no-spillback (next=kInvalidEdge) scenario
+    // from earlier in this file -- guards that on_exit()'s actual blocking
+    // decision and occupancy bookkeeping are unchanged; only the REPORTED
+    // travel_time/gate_wait_s signal changed with this fix (see the two
+    // dedicated spillback-gate tests below for that).
     auto g = make_chain();
     LtmTrafficModel model(g, LtmTrafficModel::Config{});  // enable_discharge_cap=false
     for (AgentId a = 0; a < 50; ++a) model.on_enter(0, a, 0.0);
     for (AgentId a = 0; a < 50; ++a)
         REQUIRE(model.on_exit(0, kInvalidEdge, a, 0.0));  // no rate limiting at all
     REQUIRE(model.link_states()[0].occupancy.load() == 0.0f);
+}
+
+// ── Exit-gate wait signal from pure spillback (always-on, no discharge cap) ──
+// The bug this covers: an edge pinned at ~100% storage occupancy by a
+// saturated downstream link previously reported travel_time capped at
+// ff*1.15 forever (vc = occ/storage_veh cannot exceed ~1.0, since on_enter
+// physically refuses entries once full) -- with NO growing signal at all,
+// because gate_wait_s was only wired to the opt-in discharge-credit gate,
+// never to the always-on spillback gate. Confirmed on a real Palma corridor
+// edge stuck this way for 16+ continuous hours. These tests use
+// enable_discharge_cap=false throughout, isolating the fix to the spillback
+// path alone.
+
+TEST_CASE("LtmModel: gate wait grows monotonically under pure spillback blocking (discharge cap disabled)", "[traffic]") {
+    auto g = make_chain();  // edge1 storage_veh ~6.67 -> 7 agents saturate it
+    LtmTrafficModel model(g, LtmTrafficModel::Config{});
+    for (AgentId a = 0; a < 7; ++a) model.on_enter(1, a, 0.0);
+
+    model.on_enter(0, 100, 0.0);
+    REQUIRE_FALSE(model.on_exit(0, /*next=*/1, 100, 0.0));   // blocked, gate wait starts at 0
+    model.update(0.0);
+    float tt0 = model.current_travel_time(0);
+
+    REQUIRE_FALSE(model.on_exit(0, 1, 100, 50.0));            // still blocked, wait=50s
+    model.update(50.0);
+    float tt1 = model.current_travel_time(0);
+
+    REQUIRE_FALSE(model.on_exit(0, 1, 100, 500.0));           // still blocked, wait=500s
+    model.update(500.0);
+    float tt2 = model.current_travel_time(0);
+
+    // Before the fix this would be flat (gate_term always 0 with cap disabled).
+    REQUIRE(tt1 > tt0);
+    REQUIRE(tt2 > tt1);
+}
+
+TEST_CASE("LtmModel: gate wait resets once spillback clears (discharge cap disabled)", "[traffic]") {
+    auto g = make_chain();
+    LtmTrafficModel model(g, LtmTrafficModel::Config{});
+    for (AgentId a = 0; a < 7; ++a) model.on_enter(1, a, 0.0);
+
+    model.on_enter(0, 100, 0.0);
+    REQUIRE_FALSE(model.on_exit(0, 1, 100, 0.0));
+    REQUIRE_FALSE(model.on_exit(0, 1, 100, 100.0));  // wait=100s, gate_wait_s > 0
+
+    // Downstream drains -- one agent exits edge1 to kInvalidEdge.
+    REQUIRE(model.on_exit(1, kInvalidEdge, 0, 100.0));
+
+    // Now the agent on edge0 can proceed -- gate resets to 0 on success.
+    REQUIRE(model.on_exit(0, 1, 100, 101.0));
+    model.update(101.0);
+    // occ on edge0 dropped to 0 (only agent 100 was there) -> plain free-flow.
+    float ff0 = g.free_flow_time(0);
+    REQUIRE(model.current_travel_time(0) == Catch::Approx(ff0).epsilon(0.01));
 }
 
 TEST_CASE("LtmModel: force_remove restores occupancy/capacity", "[traffic]") {

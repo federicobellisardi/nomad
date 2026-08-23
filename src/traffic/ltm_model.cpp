@@ -42,11 +42,13 @@ float LtmTrafficModel::travel_time_for(EdgeId e) const {
     float ff  = graph_.free_flow_time(e);
     float cap = c.storage_veh;
     float occ = static_cast<float>(c.occupancy);
-    // Discharge-gate wait: additive, only when the cap is enabled. Added
-    // before the early-return below so a discharge-blocked edge still gets a
-    // congestion signal even while occ/cap sits under 0.8 (the gate can bind
-    // on a link that isn't storage-congested at all).
-    float gate_term = cfg_.enable_discharge_cap ? c.gate_wait_s : 0.0f;
+    // Exit-gate wait: additive, always on (see header comment -- spillback
+    // blocking is the model's default behaviour, not opt-in). Added before
+    // the early-return below so a blocked edge still gets a congestion
+    // signal even while occ/cap sits under 0.8 (the gate can bind on a link
+    // that isn't storage-congested at all, e.g. a short link stuck behind a
+    // saturated downstream one).
+    float gate_term = c.gate_wait_s;
     if (cap <= 0.0f || occ / cap < 0.8f) return ff + gate_term;
     // Same BPR volume-delay shape as QueueTrafficModel, capped at vc=2 → 3.4× ff.
     // Reusing it here isolates the effect under test to the new exit-side
@@ -97,27 +99,30 @@ bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId /*a*/, SimTime t) {
     // Receiving-side spillback: block if the downstream link has no spare
     // storage. This is the behaviour QueueTrafficModel does not have — it
     // lets congestion genuinely propagate backward instead of only raising
-    // the current link's own travel time.
-    if (next != kInvalidEdge && next < graph_.num_edges() && !has_capacity(next))
-        return false;
+    // the current link's own travel time. Always active, not opt-in.
+    bool spillback_blocked =
+        next != kInvalidEdge && next < graph_.num_edges() && !has_capacity(next);
 
     // Sending-side discharge-rate cap (opt-in). A rigid per-exit headway
     // here was tried once and caused near-total gridlock (see header
     // comment) -- this bucket only blocks once a SUSTAINED burst exceeds
     // discharge_burst_s worth of capacity, not on isolated exits.
-    if (cfg_.enable_discharge_cap) {
-        if (c.discharge_credit < 1.0f) {
-            // Gate is binding: start (or continue) tracking how long it's
-            // been continuously blocked -- see travel_time_for().
-            if (c.gate_block_since < 0.0) c.gate_block_since = t;
-            c.gate_wait_s = static_cast<float>(t - c.gate_block_since);
-            return false;
-        }
-        c.discharge_credit -= 1.0f;
-        // Gate no longer binding for this exit -- reset.
-        c.gate_block_since = -1.0;
-        c.gate_wait_s = 0.0f;
+    bool discharge_blocked = cfg_.enable_discharge_cap && c.discharge_credit < 1.0f;
+
+    if (spillback_blocked || discharge_blocked) {
+        // Gate is binding (from either cause): start (or continue) tracking
+        // how long the head-of-queue exit has been continuously blocked --
+        // see travel_time_for() and the header comment for why this is
+        // unconditional rather than discharge-cap-only.
+        if (c.gate_block_since < 0.0) c.gate_block_since = t;
+        c.gate_wait_s = static_cast<float>(t - c.gate_block_since);
+        return false;
     }
+
+    if (cfg_.enable_discharge_cap) c.discharge_credit -= 1.0f;
+    // Gate no longer binding for this exit -- reset.
+    c.gate_block_since = -1.0;
+    c.gate_wait_s = 0.0f;
 
     if (c.occupancy > 0) --c.occupancy;
     states_[e].occupancy.store(static_cast<float>(c.occupancy), std::memory_order_relaxed);
