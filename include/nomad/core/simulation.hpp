@@ -30,6 +30,15 @@ struct SimulationConfig {
     SimTime  start_time          = 0.0;    // seconds since midnight
     SimTime  end_time            = 86400.0;
     float    sync_window_s       = 30.0f;  // traffic state sync / writer poll period
+    // Event-processing step inside each sync window. Events are handled in
+    // time order in slices of this length, and events generated while a slice
+    // is processed that still fall inside it are handled in the same slice.
+    // 0 = legacy loop (one drain per sync window): an event scheduled inside
+    // the window it was created in then waits for the next window, so an
+    // agent advances at most one edge per sync_window_s and link occupancy is
+    // inflated accordingly. Only for reproducing runs made before this field
+    // existed.
+    float    event_step_s        = 1.0f;
     float    reroute_thresh        = 0.25f;  // re-route if tt > (1+thresh)*freeflow
     float    reroute_interval_s    = 60.0f;  // minimum simulated seconds between reroute scans
     float    stuck_threshold_ratio      = 20.0f;  // teleport if elapsed > ratio × freeflow_route (0 = disabled)
@@ -45,6 +54,10 @@ struct SimulationConfig {
     bool     enable_pretrip_reroute     = false;
     float    stuck_max_hours            = 4.0f;   // hard cap: teleport after this many hours regardless of route length (0 = disabled)
     float    route_randomization_sigma  = 0.0f;   // logNormal sigma for stochastic pre-routing (0 = CH only)
+    // Replication seed: drives OD departure-time sampling (nomad-cli) and the
+    // per-agent stochastic pre-routing hash. 42 reproduces the results of
+    // builds that predate this field bit-for-bit.
+    uint32_t seed                       = 42;
     float    walk_speed_ms       = 1.39f;  // propagated from ScenarioConfig::mode_choice
     float    bike_speed_ms       = 4.17f;  // propagated from ScenarioConfig::mode_choice
     uint32_t num_threads         = 0;      // 0 = hardware_concurrency
@@ -58,9 +71,8 @@ struct SimulationConfig {
 // Hybrid DES with synchronisation windows.
 //
 // Algorithm per window [t, t + sync_window_s):
-//   1. drain_until(t + sync_window_s) → batch of events
-//   2. tbb::parallel_for(event in batch): handle_event(event)
-//      — per-link mutex serialises same-link events
+//   1-2. process_events_until(t + sync_window_s): handle every event in the
+//      window, sequentially, in event_step_s slices (see SimulationConfig)
 //   3. flush_traffic_state() — atomic snapshot
 //   4. fire SnapshotDump hook
 //   5. schedule re-routes for links exceeding reroute_thresh
@@ -111,6 +123,7 @@ public:
 
 private:
     // ── Event handlers ────────────────────────────────────────────────────────
+    void process_events_until    (SimTime wend);
     void handle_event            (const Event& e);
     void handle_depart           (const Event& e);
     // Shared mechanics of "agent a enters edge eid at time t": updates

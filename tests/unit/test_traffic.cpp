@@ -442,3 +442,46 @@ TEST_CASE("LtmModel: force_remove restores occupancy/capacity", "[traffic]") {
     model.on_enter(0, 100, 0.0);
     REQUIRE(model.on_exit(0, 1, 100, 100.0));
 }
+
+// ── Counted throughput (EdgeCounters) ─────────────────────────────────────────
+TEST_CASE("EdgeCounters: empty until initialised, then count enters/exits", "[traffic][counters]") {
+    auto g = make_single_edge();
+    QueueTrafficModel model(g);
+    REQUIRE(model.edge_counters().empty());
+    model.record_enter(0, 10.0);   // ignored: not initialised yet
+    model.init_edge_counters(g.num_edges());
+    REQUIRE(model.edge_counters().size() == g.num_edges());
+
+    model.record_enter(0, 10.0);
+    model.record_enter(0, 20.0);
+    model.record_exit(0, 50.0);
+    const auto& c = model.edge_counters()[0];
+    REQUIRE(c.n_enter == 2);
+    REQUIRE(c.n_exit == 1);
+    REQUIRE(model.edge_counters()[1].n_enter == 0);
+
+    // Re-initialising with the same size must not wipe the counters.
+    model.init_edge_counters(g.num_edges());
+    REQUIRE(model.edge_counters()[0].n_enter == 2);
+}
+
+TEST_CASE("EdgeCounters: time sums give exact vehicle-seconds over a window", "[traffic][counters]") {
+    auto g = make_single_edge();
+    QueueTrafficModel model(g);
+    model.init_edge_counters(g.num_edges());
+
+    // Vehicle A on the edge 10→50, vehicle B enters at 20 and is still there.
+    const EdgeCounters at_t0 = model.edge_counters()[0];
+    model.record_enter(0, 10.0);
+    model.record_enter(0, 20.0);
+    model.record_exit(0, 50.0);
+    const EdgeCounters at_t1 = model.edge_counters()[0];
+
+    // Horizon = latest recorded event (50): A contributes 40 s, B 30 s so far.
+    REQUIRE(model.counters_horizon() == Catch::Approx(50.0));
+    const double t0 = 0.0, t1 = model.counters_horizon();
+    const double veh_s = (at_t1.sum_t_exit - at_t0.sum_t_exit) - (at_t1.sum_t_enter - at_t0.sum_t_enter)
+                       + double(at_t1.n_enter - at_t1.n_exit) * t1
+                       - double(at_t0.n_enter - at_t0.n_exit) * t0;
+    REQUIRE(veh_s == Catch::Approx(70.0));
+}

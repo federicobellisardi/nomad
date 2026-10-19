@@ -6,6 +6,7 @@
 #include <atomic>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace nomad {
 
@@ -61,6 +62,25 @@ struct alignas(16) LinkState {
 // Shared so both traffic models produce a comparable signal.
 inline constexpr float kCongestionEmaAlpha = 0.2f;
 
+// ── Counted per-edge throughput ───────────────────────────────────────────────
+// Cumulative since simulation start, one entry per directed edge. Filled by
+// the simulation engine (not by the traffic models) on every real car
+// entry/exit, so it is identical for every ITrafficModel implementation.
+// The two time sums give the exact vehicle-seconds spent on the edge over any
+// window [t0, t1] without storing per-vehicle dwell intervals:
+//   ∫ occ dt = Δsum_t_exit − Δsum_t_enter + occ(t1)·t1 − occ(t0)·t0
+// with occ = n_enter − n_exit. t0/t1 must be ITrafficModel::counters_horizon()
+// (the latest event time recorded so far), NOT the engine's window clock:
+// events carry their own timestamps and a window's batch runs ahead of the
+// clock value writers are handed, so only the horizon is guaranteed to be
+// ≥ every recorded entry time (which keeps the integral non-negative).
+struct EdgeCounters {
+    uint32_t n_enter     = 0;    // vehicles that entered the edge
+    uint32_t n_exit      = 0;    // vehicles that left it (incl. teleported)
+    double   sum_t_enter = 0.0;  // Σ entry times [s]
+    double   sum_t_exit  = 0.0;  // Σ exit times [s]
+};
+
 // ── ITrafficModel ─────────────────────────────────────────────────────────────
 // Primary extensibility seam. Implementations:
 //   QueueTrafficModel — MATSim-style queue (default, efficient)
@@ -114,6 +134,31 @@ public:
     virtual bool has_capacity(EdgeId e) const { (void)e; return true; }
 
     virtual std::string_view model_name() const = 0;
+
+    // ── Counted throughput (see EdgeCounters) ────────────────────────────────
+    // Called by the simulation engine from its serial event loop — not
+    // thread-safe, and not meant to be called by model implementations.
+    void init_edge_counters(std::size_t num_edges) {
+        if (edge_counters_.size() != num_edges) edge_counters_.assign(num_edges, EdgeCounters{});
+    }
+    void record_enter(EdgeId e, SimTime t) {
+        if (e >= edge_counters_.size()) return;
+        ++edge_counters_[e].n_enter; edge_counters_[e].sum_t_enter += t;
+        if (t > counters_horizon_) counters_horizon_ = t;
+    }
+    void record_exit(EdgeId e, SimTime t) {
+        if (e >= edge_counters_.size()) return;
+        ++edge_counters_[e].n_exit; edge_counters_[e].sum_t_exit += t;
+        if (t > counters_horizon_) counters_horizon_ = t;
+    }
+    // Empty until init_edge_counters() has been called.
+    std::span<const EdgeCounters> edge_counters() const { return edge_counters_; }
+    // Latest event time recorded so far (0 before the first event).
+    SimTime counters_horizon() const { return counters_horizon_; }
+
+private:
+    std::vector<EdgeCounters> edge_counters_;
+    SimTime counters_horizon_ = 0.0;
 };
 
 } // namespace nomad

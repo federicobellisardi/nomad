@@ -61,6 +61,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         else if (s.contains("end_time_s"))
             cfg.simulation.end_time = parse_sim_time(s["end_time_s"]);
         cfg.simulation.sync_window_s         = s.value("sync_window_s",         cfg.simulation.sync_window_s);
+        cfg.simulation.event_step_s          = s.value("event_step_s",          cfg.simulation.event_step_s);
         cfg.simulation.reroute_thresh        = s.value("reroute_thresh",        cfg.simulation.reroute_thresh);
         cfg.simulation.reroute_interval_s    = s.value("reroute_interval_s",    cfg.simulation.reroute_interval_s);
         cfg.simulation.stuck_threshold_ratio = s.value("stuck_threshold_ratio", cfg.simulation.stuck_threshold_ratio);
@@ -69,6 +70,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.simulation.enable_pretrip_reroute = s.value("enable_pretrip_reroute", cfg.simulation.enable_pretrip_reroute);
         cfg.simulation.stuck_max_hours       = s.value("stuck_max_hours",       cfg.simulation.stuck_max_hours);
         cfg.simulation.num_threads           = s.value("num_threads",           cfg.simulation.num_threads);
+        cfg.simulation.seed                  = s.value("seed",                  cfg.simulation.seed);
         cfg.simulation.store_traces  = s.value("store_traces", cfg.simulation.store_traces);
         cfg.simulation.traffic_model = s.value("traffic_model",cfg.simulation.traffic_model);
         cfg.simulation.router        = s.value("router",       cfg.simulation.router);
@@ -216,10 +218,12 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["simulation"]["start_time"]         = fmt_dt(cfg.simulation.start_time);
     j["simulation"]["end_time"]           = fmt_dt(cfg.simulation.end_time);
     j["simulation"]["sync_window_s"]      = cfg.simulation.sync_window_s;
+    j["simulation"]["event_step_s"]       = cfg.simulation.event_step_s;
     j["simulation"]["reroute_thresh"]     = cfg.simulation.reroute_thresh;
     j["simulation"]["reroute_interval_s"] = cfg.simulation.reroute_interval_s;
     j["simulation"]["enable_pretrip_reroute"] = cfg.simulation.enable_pretrip_reroute;
     j["simulation"]["num_threads"]        = cfg.simulation.num_threads;
+    j["simulation"]["seed"]               = cfg.simulation.seed;
     j["simulation"]["store_traces"]       = cfg.simulation.store_traces;
     j["simulation"]["traffic_model"]      = cfg.simulation.traffic_model;
     j["simulation"]["router"]             = cfg.simulation.router;

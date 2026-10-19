@@ -197,7 +197,7 @@ static int run_scenario(ScenarioConfig cfg) {
             else if (m == "transit") allowed_modes.push_back(AgentMode::Transit);
         }
         sim.set_demand(std::make_shared<OdMatrixDemand>(
-            OdMatrixDemand::from_csv(*cfg.demand.od_csv, 42,
+            OdMatrixDemand::from_csv(*cfg.demand.od_csv, cfg.simulation.seed,
                 cfg.simulation.start_time, cfg.simulation.end_time,
                 allowed_modes, cfg.demand.demand_scale)));
     } else if (cfg.demand.source == "gravity") {

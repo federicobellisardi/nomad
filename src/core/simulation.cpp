@@ -100,6 +100,8 @@ void Simulation::inject_demand() {
     // sigma = 0.08: each edge costs ±8% of free-flow → agents diverge at
     // junctions where multiple paths are within 8% of each other in travel time.
     const float sigma = cfg_.route_randomization_sigma;
+    // (seed - 42) so the default seed leaves the historical constant unchanged.
+    const uint32_t route_seed_base = 0xCA7F00Du ^ ((cfg_.seed - 42u) * 0x85ebca6bu);
     std::unique_ptr<AStarRouter> stoch_router;
     if (sigma > 0.0f) {
         AStarRouter::Config stoch_cfg;
@@ -128,7 +130,7 @@ void Simulation::inject_demand() {
                     };
 
                     if (stoch_router) {
-                        uint32_t seed = 0xCA7F00Du ^ (static_cast<uint32_t>(a) * 2654435761u);
+                        uint32_t seed = route_seed_base ^ (static_cast<uint32_t>(a) * 2654435761u);
                         Route r = stoch_router->route_stochastic(
                             req.origin, req.destination, req.mode, seed, sigma);
 
@@ -313,6 +315,7 @@ void Simulation::enter_edge_now(AgentId a, EdgeId eid, SimTime t) {
     SimTime exit_time;
     if (traffic_ && hot_.mode[a] == AgentMode::Car) {
         exit_time = traffic_->on_enter(eid, a, t);
+        traffic_->record_enter(eid, t);
     } else {
         exit_time = t + graph_->mode_free_flow_time(
             eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
@@ -345,6 +348,7 @@ void Simulation::handle_exit_link(const Event& e) {
         eq_.push({e.time + 1.0, a, eid, EventType::AgentExitLink, {}});
         return;
     }
+    if (traffic_ && hot_.mode[a] == AgentMode::Car) traffic_->record_exit(eid, e.time);
 
     hot_.route_pos[a] = pos;
 
@@ -471,8 +475,10 @@ void Simulation::teleport_stuck_agents(SimTime now) {
 
         // Teleport: remove from link, mark arrived
         EdgeId eid = hot_.current_edge[a];
-        if (eid < graph_->num_edges() && traffic_ && hot_.mode[a] == AgentMode::Car)
+        if (eid < graph_->num_edges() && traffic_ && hot_.mode[a] == AgentMode::Car) {
             traffic_->force_remove(eid, a);
+            traffic_->record_exit(eid, now);
+        }
 
         uint32_t rc = std::min<uint32_t>(hot_.reroute_count[a], teleported_by_reroute_count_.size() - 1);
         ++teleported_by_reroute_count_[rc];
@@ -679,6 +685,8 @@ void Simulation::run_until(SimTime until) {
     if (!graph_) throw std::runtime_error("Simulation::run_until: graph not set");
 
     // Build the traffic-aware A* router used for en-route rerouting.
+    if (graph_ && traffic_) traffic_->init_edge_counters(graph_->num_edges());
+
     // Created here so it sees the already-set traffic_ model.
     if (!reroute_router_ && graph_ && traffic_) {
         AStarRouter::Config acfg;
@@ -713,14 +721,7 @@ void Simulation::run_until(SimTime until) {
             last_log_events = events_processed_.load();
         }
 
-        std::vector<Event> batch;
-        eq_.drain_until(wend, batch);
-
-        // Phase 1: always sequential. Parallel dispatch requires per-agent
-        // locks on EventQueue, RouteStore and AgentHotStore — planned Phase 3.
-        // Enabling TBB parallel_for here without those locks causes data races
-        // on shared vectors → segfault.
-        for (const auto& ev : batch) handle_event(ev);
+        process_events_until(wend);
 
         flush_traffic_state();
         schedule_reroutes();
@@ -937,12 +938,40 @@ void Simulation::run_until(SimTime until) {
             std::chrono::steady_clock::now() - t_start).count());
 }
 
+void Simulation::process_events_until(SimTime wend) {
+    // Always sequential. Parallel dispatch requires per-agent locks on
+    // EventQueue, RouteStore and AgentHotStore — planned Phase 3. Enabling TBB
+    // parallel_for here without those locks causes data races on shared
+    // vectors → segfault.
+    std::vector<Event> batch;
+    if (cfg_.event_step_s <= 0.0f) {
+        eq_.drain_until(wend, batch);
+        for (const auto& ev : batch) handle_event(ev);
+        return;
+    }
+
+    // Handling an event usually schedules the agent's next one (exit of the
+    // edge just entered, 1 s retry of a blocked exit/departure). Those must
+    // run at their own time, not a whole sync window later — so each slice is
+    // drained repeatedly until nothing earlier than its end is left. Every
+    // follow-up is strictly later than its cause or advances the agent along
+    // a finite route, so the inner loop terminates.
+    SimTime slice_end = current_time_.load();
+    while (slice_end < wend) {
+        slice_end = std::min<SimTime>(slice_end + cfg_.event_step_s, wend);
+        for (;;) {
+            batch.clear();
+            eq_.drain_until(slice_end, batch);
+            if (batch.empty()) break;
+            for (const auto& ev : batch) handle_event(ev);
+        }
+    }
+}
+
 void Simulation::step() {
     if (eq_.empty() || current_time_.load() >= cfg_.end_time) return;
     SimTime wend = current_time_.load() + cfg_.sync_window_s;
-    std::vector<Event> batch;
-    eq_.drain_until(wend, batch);
-    for (const auto& ev : batch) handle_event(ev);
+    process_events_until(wend);
     flush_traffic_state();
     current_time_.store(wend);
 }
