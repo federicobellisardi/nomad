@@ -70,8 +70,8 @@ inline constexpr bool road_class_accessible(RoadClass klass, AgentMode mode) noe
                klass != RoadClass::MotorwayLink &&
                klass != RoadClass::Steps;
     case AgentMode::Walk:
-        return klass != RoadClass::Motorway &&
-               klass != RoadClass::MotorwayLink;
+        // no walking on motorways or trunk roads (and their links)
+        return klass > RoadClass::TrunkLink;
     case AgentMode::Transit:
         return true;                               // transit graph: Phase 6
     default:

@@ -47,6 +47,8 @@ OsmTagConfig OsmTagConfig::defaults() {
         {"track",         {RoadClass::Track,          20.0f, 1,  400.0f}},
         {"cycleway",      {RoadClass::Cycleway,       15.0f, 1,  300.0f}},
         {"footway",       {RoadClass::Footway,         5.0f, 1,  600.0f}},
+        // Pedestrianised streets: same access as a footway (walk/bike, no cars).
+        {"pedestrian",    {RoadClass::Footway,         5.0f, 1,  600.0f}},
         {"path",          {RoadClass::Path,            5.0f, 1,  400.0f}},
         {"steps",         {RoadClass::Steps,           2.0f, 1,  200.0f}},
     };
@@ -160,18 +162,36 @@ struct NomadWayHandler : osmium::handler::Handler {
         auto it = cfg.highway_map.find(highway);
         if (it == cfg.highway_map.end()) return;
 
-        const auto& defaults = it->second;
+        auto defaults = it->second;
 
-        // Access check
+        // Access check. A way closed to cars is not necessarily closed to
+        // people on foot: only a general access=no/... without an explicit
+        // foot permission removes it from the graph. A way closed to motor
+        // vehicles specifically (or with foot explicitly allowed) is kept as
+        // a walk/bike-only link, i.e. demoted to Footway.
         const char* access = way.tags()["access"];
         const char* motor  = way.tags()["motor_vehicle"];
         const char* car    = way.tags()["motorcar"];
+        const char* foot   = way.tags()["foot"];
         std::string access_str = motor ? motor : (car ? car : (access ? access : ""));
-        // Basic car accessible check
-        bool accessible = true;
+        bool car_excluded = false;
         for (const auto& ex : cfg.car_exclude_tags)
-            if (access_str == ex) { accessible = false; break; }
-        if (!accessible) return;
+            if (access_str == ex) { car_excluded = true; break; }
+        if (car_excluded) {
+            bool foot_allowed = false;
+            if (foot)
+                for (const auto& a : cfg.pedestrian_access_tags)
+                    if (a == foot) { foot_allowed = true; break; }
+            const bool vehicle_specific = motor || car;
+            if (!vehicle_specific && !foot_allowed) return;
+            if (defaults.klass <= RoadClass::Unclassified) {
+                defaults = cfg.highway_map.at("footway");
+            }
+        }
+        const bool car_class = defaults.klass <= RoadClass::Unclassified;
+        // People on foot do not walk on motorways or trunk roads, and are not
+        // bound by a street's one-way restriction.
+        const bool walkable_car_class = car_class && defaults.klass >= RoadClass::Primary;
 
         // Speed
         const char* maxspeed = way.tags()["maxspeed"];
@@ -200,6 +220,9 @@ struct NomadWayHandler : osmium::handler::Handler {
                                      std::string(oneway) == "1"  ||
                                      std::string(oneway) == "true");
         bool reversed  = oneway && std::string(oneway) == "-1";
+        // Links that carry no cars (footway, path, pedestrian street, ...) are
+        // always two-way.
+        if (!car_class) { is_oneway = false; reversed = false; }
 
         // Flags
         uint8_t flags = 0;
@@ -271,6 +294,18 @@ struct NomadWayHandler : osmium::handler::Handler {
                 rev.from_node = nB.ref();
                 rev.to_node   = nA.ref();
                 rev.flags     |= EdgeFlags::Reversed;
+                raw_edges.push_back(rev);
+            } else if (walkable_car_class) {
+                // One-way street: cars go one way, people on foot both. The
+                // contraflow direction is a walk/bike-only link alongside it.
+                const auto& footway = cfg.highway_map.at("footway");
+                RawEdge rev  = fwd;
+                rev.from_node = fwd.to_node;
+                rev.to_node   = fwd.from_node;
+                rev.road_class = static_cast<uint8_t>(footway.klass);
+                rev.speed_ms  = footway.default_speed_kmh / 3.6f;
+                rev.capacity  = footway.default_lanes * footway.capacity_per_lane_veh_h;
+                rev.flags     = static_cast<uint8_t>((flags & ~EdgeFlags::OneWay) | EdgeFlags::Reversed);
                 raw_edges.push_back(rev);
             }
         }
