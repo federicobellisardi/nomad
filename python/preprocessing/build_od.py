@@ -133,8 +133,13 @@ DISTANCE_MODE_FRACTIONS: dict[str, dict[str, float]] = {
 
 def stream_viajes(viajes_files: list, cols: dict,
                   fua_zone_ids: set, weekend: bool,
-                  holidays_set: set) -> "pd.DataFrame | None":
+                  holidays_set: set,
+                  only_date: "dt.date | None" = None) -> "pd.DataFrame | None":
     """Stream viajes files for one day-type and return the mean OD.
+
+    If only_date is given, the day-type filter is bypassed and only that
+    calendar day's file is used -- the "mean" is then that single day's
+    observed OD (see --dates).
 
     Uses a dict accumulator (key → [sum, count]) instead of DataFrame merges
     to keep memory proportional to the number of unique OD pairs, not to
@@ -169,7 +174,10 @@ def stream_viajes(viajes_files: list, cols: dict,
         if not m:
             continue
         file_date = dt.datetime.strptime(m.group(1), "%Y%m%d").date()
-        if is_weekend(file_date, holidays_set) != weekend:
+        if only_date is not None:
+            if file_date != only_date:
+                continue
+        elif is_weekend(file_date, holidays_set) != weekend:
             continue
 
         gz = str(fpath).endswith(".gz")
@@ -230,7 +238,7 @@ CAR_MAX_ROAD_CLASS = 13   # RoadClass.Unclassified — cars cannot use Track or 
 # Excluded road classes per mode — mirrors road_class_accessible() in
 # include/nomad/core/types.hpp. RoadClass values: Motorway=0, MotorwayLink=1,
 # ..., Steps=18. Keep in sync if that enum changes.
-WALK_EXCLUDED_CLASSES = {0, 1}       # Motorway, MotorwayLink
+WALK_EXCLUDED_CLASSES = {0, 1, 2, 3} # Motorway, MotorwayLink, Trunk, TrunkLink
 BIKE_EXCLUDED_CLASSES = {0, 1, 18}   # Motorway, MotorwayLink, Steps
 
 
@@ -326,8 +334,15 @@ def build_od_rows(od_fua: pd.DataFrame,
                   scale: float = 1.0,
                   occupancy_factor: float = 1.0,
                   mode_choice_fn=None,
-                  transit_frac_override: "float | None" = None) -> pd.DataFrame:
+                  transit_frac_override: "float | None" = None,
+                  with_cells: bool = False) -> pd.DataFrame:
     """Convert zone-level MITMA OD to node-level nomad OD rows.
+
+    with_cells: also return, for every output row, the MITMA cell it was
+    generated from (orig_zone, dest_zone, period, distance_band) as four
+    extra columns. Purely additive -- the six OD columns, their order and
+    the random draws behind them are unchanged -- so a caller can join
+    per-cell attributes (e.g. traveller income/age shares) onto OD rows.
 
     occupancy_factor: average persons per car trip.  Divides car person-trips
     to obtain vehicle-trips (e.g. 1.20 for Spain average).  Set to 1.0 to
@@ -478,7 +493,9 @@ def build_od_rows(od_fua: pd.DataFrame,
                 pair_count = base + (1 if i < rem else 0)
                 if int(o) != int(d) and pair_count > 0:
                     rows.append((int(o), int(d), pair_count, mode,
-                                 float(periodo * 3600), float((periodo + 1) * 3600)))
+                                 float(periodo * 3600), float((periodo + 1) * 3600),
+                                 str(r[COL_ORIG]), str(r[COL_DEST]), periodo,
+                                 str(r[COL_DIST]) if COL_DIST else ""))
 
     total_person = n_intra_person + n_inter_person
     total_veh    = n_intra_veh    + n_inter_veh
@@ -491,10 +508,15 @@ def build_od_rows(od_fua: pd.DataFrame,
               f"(riduzione occupancy {100*(1-total_veh/total_person):.1f}%)")
     if skipped > 0:
         print(f"  viaggi senza nodi nel distretto: {skipped:.0f}")
-    return pd.DataFrame(rows, columns=[
+    out = pd.DataFrame(rows, columns=[
         "origin_node", "dest_node", "count", "mode",
         "depart_mean_s", "depart_std_s",
+        "orig_zone", "dest_zone", "period", "distance_band",
     ])
+    return out if with_cells else out[OD_ROW_COLUMNS]
+
+
+OD_ROW_COLUMNS = ["origin_node", "dest_node", "count", "mode", "depart_mean_s", "depart_std_s"]
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -526,7 +548,20 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
                              "se sono presenti piu' mesi scaricati (es. per citta' diverse), il default "
                              "li mischia tutti insieme silenziosamente. Specificare sempre esplicitamente "
                              "quando od_raw puo' contenere piu' di un mese.")
+    parser.add_argument("--dates", default=None,
+                        help="Date ISO comma-separated (es. '2022-07-14,2022-07-20'). Se specificato, "
+                             "NON genera le medie weekday/weekend: genera invece una matrice per "
+                             "ciascuna data dal solo file MITMA di quel giorno, "
+                             "od_{slug}_{YYYY-MM-DD}.csv. Per avere i conteggi osservati del giorno "
+                             "senza rumore aggiunto usare --noise-sigma 0.")
+    parser.add_argument("--cells-only", action="store_true",
+                        help="Non riscrive od_{slug}_{label}.csv: rigenera le stesse righe e scrive solo "
+                             "od_{slug}_{label}_cells.parquet (per ogni riga OD, la cella MITMA di "
+                             "provenienza: orig_zone, dest_zone, period, distance_band). Fallisce se le "
+                             "righe rigenerate non coincidono con il CSV esistente.")
     args = parser.parse_args(argv)
+    single_dates = ([dt.date.fromisoformat(s.strip()) for s in args.dates.split(",")]
+                    if args.dates else [])
 
     data_dir  = Path(args.data_dir)
     city_slug = slugify(args.city)
@@ -657,14 +692,26 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
     OD_COLUMNS = ["origin_node", "dest_node", "count", "mode",
                   "depart_mean_s", "depart_std_s"]
 
-    for label, weekend in [("weekday", False), ("weekend", True)]:
-        n_files = n_weekday if not weekend else n_weekend
+    if single_dates:
+        jobs = [(d.isoformat(), False, d) for d in single_dates]
+    else:
+        jobs = [("weekday", False, None), ("weekend", True, None)]
+
+    for label, weekend, only_date in jobs:
+        if only_date is not None:
+            n_files = sum(1 for fp in viajes_files if only_date.strftime("%Y%m%d") in fp.name)
+            # Own stream per date: a date's OD must not depend on which other
+            # dates were requested in the same call.
+            rng = np.random.default_rng(args.seed)
+        else:
+            n_files = n_weekday if not weekend else n_weekend
         if n_files == 0:
             print(f"\n[{label}] nessun file disponibile — salto")
             continue
 
         print(f"\n[{label}] Caricamento viajes ({n_files} file) …")
-        od_fua = stream_viajes(viajes_files, cols, fua_zone_ids, weekend, holidays_set)
+        od_fua = stream_viajes(viajes_files, cols, fua_zone_ids, weekend, holidays_set,
+                               only_date=only_date)
         if od_fua is None:
             print(f"  nessun dato — salto")
             continue
@@ -684,11 +731,43 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
                                  bike_nodes=bike_nodes, scale=args.scale,
                                  occupancy_factor=args.occupancy_factor,
                                  mode_choice_fn=mode_choice_fn,
-                                 transit_frac_override=transit_frac_override)
+                                 transit_frac_override=transit_frac_override,
+                                 with_cells=True)
+        cells = od_nomad[["orig_zone", "dest_zone", "period", "distance_band"]]
+        od_nomad = od_nomad[OD_ROW_COLUMNS]
         print(f"  righe: {len(od_nomad):,}   agenti: {od_nomad['count'].sum():,}")
 
         od_path = city_dir / f"od_{city_slug}_{label}.csv"
+        cells_path = city_dir / f"od_{city_slug}_{label}_cells.parquet"
+        if args.cells_only:
+            # The node drawn inside a zone is not reproducible run-to-run, so
+            # the regenerated rows are matched to the existing CSV by what a
+            # cell actually determines: row order, hour, mode and the zones the
+            # existing row's own nodes fall in.
+            existing = pd.read_csv(od_path)
+            if len(existing) != len(od_nomad):
+                raise SystemExit(f"  --cells-only: {len(od_nomad):,} righe rigenerate vs {len(existing):,} in "
+                                 f"{od_path} -- celle non scritte")
+            # Membership, not a node->zone map: a node can sit in several
+            # zones' pools.
+            pools = {z: set(int(n) for n in ns) for z, ns in zone_to_nodes.items()}
+            in_pool = lambda nodes, zones: np.fromiter(
+                (int(n) in pools.get(z, ()) for n, z in zip(nodes, zones)), dtype=bool, count=len(nodes))
+            checks = {
+                "ora": existing["depart_mean_s"].values == od_nomad["depart_mean_s"].values,
+                "modo": existing["mode"].values == od_nomad["mode"].values,
+                "zona origine": in_pool(existing["origin_node"].values, cells["orig_zone"].values),
+                "zona destinazione": in_pool(existing["dest_node"].values, cells["dest_zone"].values),
+            }
+            for name, ok in checks.items():
+                print(f"    {name}: {ok.mean():.3%} righe coincidenti")
+            if min(ok.mean() for ok in checks.values()) < 0.999:
+                raise SystemExit(f"  --cells-only: le righe rigenerate NON corrispondono a {od_path} -- celle non scritte")
+            cells.to_parquet(cells_path, index=False)
+            print(f"  → {cells_path}")
+            continue
         od_nomad.to_csv(od_path, index=False)
+        cells.to_parquet(cells_path, index=False)
         assert list(pd.read_csv(od_path, nrows=1).columns) == OD_COLUMNS
         print(f"  → {od_path}  ({od_path.stat().st_size/1e6:.1f} MB)")
 
