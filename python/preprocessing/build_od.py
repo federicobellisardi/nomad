@@ -335,7 +335,8 @@ def build_od_rows(od_fua: pd.DataFrame,
                   occupancy_factor: float = 1.0,
                   mode_choice_fn=None,
                   transit_frac_override: "float | None" = None,
-                  with_cells: bool = False) -> pd.DataFrame:
+                  with_cells: bool = False,
+                  node_weight: "dict | None" = None) -> pd.DataFrame:
     """Convert zone-level MITMA OD to node-level nomad OD rows.
 
     with_cells: also return, for every output row, the MITMA cell it was
@@ -365,6 +366,12 @@ def build_od_rows(od_fua: pd.DataFrame,
     adjustment) without breaking callers whose mode_choice_fn only takes
     distance_km.
 
+    node_weight: optional {node_id: weight >= 0}. When given, trip ends are
+    drawn inside each zone with probability proportional to the node's
+    weight (e.g. built volume around it) instead of uniformly; a zone whose
+    pool has zero total weight falls back to the uniform draw. None keeps
+    the uniform draw, unchanged.
+
     transit_frac_override: optional real, city-specific transit (public
     transport) mode share [0-1]. DISTANCE_MODE_FRACTIONS's own "transit"
     value is a flat, national, distance-band-only figure -- never
@@ -391,6 +398,20 @@ def build_od_rows(od_fua: pd.DataFrame,
             mode_choice_fn_accepts_period = "period" in inspect.signature(mode_choice_fn).parameters
         except (TypeError, ValueError):
             mode_choice_fn_accepts_period = False
+
+    pool_cache: dict = {}
+
+    def pool_and_p(zone: str, mode: str, all_pool: list):
+        key = (zone, mode)
+        if key not in pool_cache:
+            pool = mode_node_pool(mode, all_pool, car_nodes, walk_nodes, bike_nodes)
+            p = None
+            if node_weight is not None and pool:
+                w = np.array([node_weight.get(int(n), 0.0) for n in pool], dtype=float)
+                if w.sum() > 0:
+                    p = w / w.sum()
+            pool_cache[key] = (pool, p)
+        return pool_cache[key]
 
     rows = []
     skipped = 0.0
@@ -477,8 +498,8 @@ def build_od_rows(od_fua: pd.DataFrame,
             if count < 1:
                 continue
 
-            orig_pool = mode_node_pool(mode, all_orig, car_nodes, walk_nodes, bike_nodes)
-            dest_pool = mode_node_pool(mode, all_dest, car_nodes, walk_nodes, bike_nodes)
+            orig_pool, orig_p = pool_and_p(str(r[COL_ORIG]), mode, all_orig)
+            dest_pool, dest_p = pool_and_p(str(r[COL_DEST]), mode, all_dest)
             if not orig_pool or not dest_pool:
                 skipped += mode_trips
                 continue
@@ -487,8 +508,8 @@ def build_od_rows(od_fua: pd.DataFrame,
             base     = count // n_pairs
             rem      = count % n_pairs
 
-            origs = rng.choice(orig_pool, n_pairs, replace=True)
-            dests = rng.choice(dest_pool, n_pairs, replace=True)
+            origs = rng.choice(orig_pool, n_pairs, replace=True, p=orig_p)
+            dests = rng.choice(dest_pool, n_pairs, replace=True, p=dest_p)
             for i, (o, d) in enumerate(zip(origs, dests)):
                 pair_count = base + (1 if i < rem else 0)
                 if int(o) != int(d) and pair_count > 0:
@@ -554,6 +575,13 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
                              "ciascuna data dal solo file MITMA di quel giorno, "
                              "od_{slug}_{YYYY-MM-DD}.csv. Per avere i conteggi osservati del giorno "
                              "senza rumore aggiunto usare --noise-sigma 0.")
+    parser.add_argument("--node-weights", default=None,
+                        help="Parquet [node_id, weight]: estremi dei viaggi estratti in ogni zona con "
+                             "probabilita' proporzionale al peso del nodo (es. volume costruito) invece "
+                             "che uniforme. Default: estrazione uniforme.")
+    parser.add_argument("--label-suffix", default="",
+                        help="Suffisso aggiunto all'etichetta dei file di uscita "
+                             "(od_{slug}_{label}{suffix}.csv), es. '_bv_s43' per una replica.")
     parser.add_argument("--cells-only", action="store_true",
                         help="Non riscrive od_{slug}_{label}.csv: rigenera le stesse righe e scrive solo "
                              "od_{slug}_{label}_cells.parquet (per ogni riga OD, la cella MITMA di "
@@ -688,6 +716,11 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
 
     city_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
+    node_weight = None
+    if args.node_weights:
+        nw = pd.read_parquet(args.node_weights)
+        node_weight = dict(zip(nw["node_id"].astype(int), nw["weight"].astype(float)))
+        print(f"Pesi dei nodi: {args.node_weights} ({(nw['weight'] > 0).mean():.1%} nodi con peso > 0)")
 
     OD_COLUMNS = ["origin_node", "dest_node", "count", "mode",
                   "depart_mean_s", "depart_std_s"]
@@ -732,11 +765,12 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
                                  occupancy_factor=args.occupancy_factor,
                                  mode_choice_fn=mode_choice_fn,
                                  transit_frac_override=transit_frac_override,
-                                 with_cells=True)
+                                 with_cells=True, node_weight=node_weight)
         cells = od_nomad[["orig_zone", "dest_zone", "period", "distance_band"]]
         od_nomad = od_nomad[OD_ROW_COLUMNS]
         print(f"  righe: {len(od_nomad):,}   agenti: {od_nomad['count'].sum():,}")
 
+        label = f"{label}{args.label_suffix}"
         od_path = city_dir / f"od_{city_slug}_{label}.csv"
         cells_path = city_dir / f"od_{city_slug}_{label}_cells.parquet"
         if args.cells_only:
