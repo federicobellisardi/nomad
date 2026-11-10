@@ -18,10 +18,9 @@ data/test_data/
 
 # ── Downloaded / generated scenario data (regenerate via python/download_data,
 # python/preprocessing) ───────────────────────────────────────────────────────
-data/fua/
-data/od_raw/
-data/osm/
-data/palma_de_mallorca/
+# city data are symlinks to the shared green_mobility workspace
+data/*
+!data/schemas/
 
 # ── Simulation results ────────────────────────────────────────────────────────
 results/
