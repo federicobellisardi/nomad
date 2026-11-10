@@ -29,6 +29,7 @@ highway_defaults:
   track:          [20,  1,  200]
   cycleway:       [15,  1,  300]
   footway:        [5,   1,  600]
+  pedestrian:     [5,   1,  600]
   path:           [5,   1,  400]
   steps:          [2,   1,  200]
 

@@ -90,7 +90,12 @@ void EventQueue::drain_until(SimTime until_time, std::vector<Event>& out) {
     for (int b = current_bucket_; b < max_bucket && b < kTotalBuckets; ++b) {
         out.insert(out.end(), calendar_[b].begin(), calendar_[b].end());
         size_ -= calendar_[b].size();
-        calendar_[b].clear();
+        // Release the bucket's storage, not just its contents: a bucket is a
+        // second of simulated time that the clock does not come back to, and
+        // clear() would keep its peak capacity allocated for the rest of the
+        // run. In a congested city the per-second peak (every blocked agent
+        // retrying once a second) summed over the day reached hundreds of GB.
+        std::vector<Event>().swap(calendar_[b]);
     }
     // Boundary bucket: filter by time
     if (max_bucket < kTotalBuckets) {

@@ -11,10 +11,14 @@ struct GeoJsonWriter::Impl {
     float interval;
     // edge_src[e] = source node of edge e (built once on first snapshot)
     std::vector<NodeId> edge_src;
+    // Cumulative counters and counters_horizon() as of the previous snapshot,
+    // to emit per-bin deltas.
+    std::vector<EdgeCounters> prev_counters;
+    SimTime prev_t = 0.0;
 };
 
 GeoJsonWriter::GeoJsonWriter(std::filesystem::path output_dir, float snapshot_interval_s)
-    : impl_(std::make_unique<Impl>(Impl{std::move(output_dir), snapshot_interval_s, {}})),
+    : impl_(std::make_unique<Impl>(Impl{std::move(output_dir), snapshot_interval_s, {}, {}, 0.0})),
       snapshot_interval_s_(snapshot_interval_s) {
     std::filesystem::create_directories(impl_->dir);
 }
@@ -48,10 +52,30 @@ void GeoJsonWriter::on_snapshot(SimTime t, const AgentHotStore&,
     f << R"({"type":"FeatureCollection","features":[)";
 
     const auto states = traffic.link_states();
+    // Counted throughput since the previous snapshot (see EdgeCounters). Edges
+    // that carried vehicles during the bin but are empty at the snapshot
+    // instant get a row too — otherwise their counts would be dropped.
+    const auto counters = traffic.edge_counters();
+    const bool counted = counters.size() == g.num_edges();
+    if (counted && impl_->prev_counters.size() != counters.size())
+        impl_->prev_counters.assign(counters.size(), EdgeCounters{});
+    const SimTime horizon = traffic.counters_horizon();
+
     bool first = true;
     for (uint32_t e = 0; e < g.num_edges(); ++e) {
         float occ = states[e].occupancy.load();
-        if (occ == 0.0f) continue;
+        uint32_t n_enter = 0, n_exit = 0;
+        double veh_seconds = 0.0;
+        if (counted) {
+            const EdgeCounters& c = counters[e];
+            const EdgeCounters& p = impl_->prev_counters[e];
+            n_enter = c.n_enter - p.n_enter;
+            n_exit  = c.n_exit  - p.n_exit;
+            veh_seconds = (c.sum_t_exit - p.sum_t_exit) - (c.sum_t_enter - p.sum_t_enter)
+                        + static_cast<double>(c.n_enter - c.n_exit) * horizon
+                        - static_cast<double>(p.n_enter - p.n_exit) * impl_->prev_t;
+        }
+        if (occ == 0.0f && n_enter == 0 && n_exit == 0) continue;
 
         const EdgeData& ed = g.edges[e];
         NodeId src = impl_->edge_src[e];
@@ -98,11 +122,20 @@ void GeoJsonWriter::on_snapshot(SimTime t, const AgentHotStore&,
         // Density [veh/km]
         float density = (ed.length_m > 0.0f) ? occ / (ed.length_m * 0.001f) : 0.0f;
         f << R"(,"density_veh_km":)" << density;
+        if (counted) {
+            f << R"(,"n_enter":)"     << n_enter;
+            f << R"(,"n_exit":)"      << n_exit;
+            f << R"(,"veh_seconds":)" << veh_seconds;
+        }
         if (!g.way_names.empty() && ed.way_meta_idx < g.way_names.size())
             f << R"(,"name":")" << g.way_names[ed.way_meta_idx] << '"';
         f << "}}";
     }
     f << "]}";
+    if (counted) {
+        impl_->prev_counters.assign(counters.begin(), counters.end());
+        impl_->prev_t = horizon;
+    }
     spdlog::debug("GeoJsonWriter: wrote {}", path.string());
 }
 

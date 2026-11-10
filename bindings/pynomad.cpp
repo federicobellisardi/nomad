@@ -463,6 +463,64 @@ PYBIND11_MODULE(_nomad_core, m) {
         }, py::arg("output_dir"), py::arg("snapshot_interval_s") = 300.0f);
 
     // ── Test-only synthetic Graph builder ─────────────────────────────────────
+    // Build a Graph from explicit arrays — used to derive a per-mode layer
+    // (e.g. a car-only layer with its own link contraction) from a base graph
+    // while keeping the base graph's node ids and coordinates. Edges must be
+    // sorted by from_node; edge id = position in the arrays.
+    m.def("graph_from_arrays", [](
+              py::array_t<float, py::array::c_style | py::array::forcecast> lon,
+              py::array_t<float, py::array::c_style | py::array::forcecast> lat,
+              py::array_t<uint8_t, py::array::c_style | py::array::forcecast> intersection_type,
+              py::array_t<uint32_t, py::array::c_style | py::array::forcecast> from_node,
+              py::array_t<uint32_t, py::array::c_style | py::array::forcecast> to_node,
+              py::array_t<float, py::array::c_style | py::array::forcecast> length_m,
+              py::array_t<float, py::array::c_style | py::array::forcecast> speed_ms,
+              py::array_t<float, py::array::c_style | py::array::forcecast> capacity,
+              py::array_t<uint8_t, py::array::c_style | py::array::forcecast> road_class) {
+        const auto n = static_cast<uint32_t>(lon.size());
+        const auto e = static_cast<size_t>(from_node.size());
+        if (lat.size() != lon.size() || intersection_type.size() != lon.size())
+            throw py::value_error("node arrays must have the same length");
+        if (static_cast<size_t>(to_node.size()) != e || static_cast<size_t>(length_m.size()) != e ||
+            static_cast<size_t>(speed_ms.size()) != e || static_cast<size_t>(capacity.size()) != e ||
+            static_cast<size_t>(road_class.size()) != e)
+            throw py::value_error("edge arrays must have the same length");
+        Graph g;
+        g.nodes.resize(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            g.nodes[i].lon = lon.at(i);
+            g.nodes[i].lat = lat.at(i);
+            g.nodes[i].intersection_type = intersection_type.at(i);
+        }
+        g.row_ptr.assign(n + 1, 0);
+        uint32_t prev = 0;
+        for (size_t k = 0; k < e; ++k) {
+            const uint32_t from = from_node.at(k);
+            if (from >= n || to_node.at(k) >= n) throw py::value_error("edge endpoint out of range");
+            if (from < prev) throw py::value_error("edges must be sorted by from_node");
+            prev = from;
+            ++g.row_ptr[from + 1];
+        }
+        for (uint32_t i = 0; i < n; ++i) g.row_ptr[i + 1] += g.row_ptr[i];
+        g.edges.resize(e);
+        g.col_idx.resize(e);
+        for (size_t k = 0; k < e; ++k) {
+            EdgeData ed{};
+            ed.target          = to_node.at(k);
+            ed.length_m        = length_m.at(k);
+            ed.free_flow_speed = speed_ms.at(k);
+            ed.capacity        = capacity.at(k);
+            ed.road_class      = road_class.at(k);
+            g.edges[k]   = ed;
+            g.col_idx[k] = static_cast<EdgeId>(k);
+        }
+        g.geom_ptr.assign(e + 1, 0);
+        return std::make_shared<Graph>(std::move(g));
+    }, py::arg("lon"), py::arg("lat"), py::arg("intersection_type"), py::arg("from_node"), py::arg("to_node"),
+       py::arg("length_m"), py::arg("speed_ms"), py::arg("capacity"), py::arg("road_class"),
+    "Build a Graph from node arrays (lon, lat, intersection_type) and directed-edge arrays "
+    "sorted by from_node (from_node, to_node, length_m, speed_ms, capacity, road_class).");
+
     // Graph has no other Python-visible constructor (OsmLoader.load_and_clean
     // or Graph.load(cache) are the only ways to get one) — this exists purely
     // so small artificial networks can be unit-tested from Python without a
