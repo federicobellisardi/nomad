@@ -1,5 +1,6 @@
 # ── Build ─────────────────────────────────────────────────────────────────────
 build/
+build-cluster/
 build_asan/
 cmake-build-*/
 *.o
