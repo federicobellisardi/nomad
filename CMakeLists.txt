@@ -78,7 +78,14 @@ endif()
 
 # ── Python extension (_nomad_core) ────────────────────────────────────────────
 if(NOMAD_BUILD_PYTHON)
+    # Prefer the active conda env's interpreter over a system Python on PATH.
+    if(DEFINED ENV{CONDA_PREFIX} AND NOT DEFINED Python_EXECUTABLE)
+        set(Python_ROOT_DIR "$ENV{CONDA_PREFIX}")
+        set(Python_FIND_STRATEGY LOCATION)
+    endif()
     find_package(Python COMPONENTS Interpreter Development REQUIRED)
+    # The static core is linked into a shared Python module.
+    set_target_properties(nomad_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
     # pybind11 already fetched/found in Dependencies.cmake
     pybind11_add_module(_nomad_core bindings/pynomad.cpp)
     target_link_libraries(_nomad_core PRIVATE nomad_core)

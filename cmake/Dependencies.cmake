@@ -131,7 +131,11 @@ if(NOT yaml-cpp_FOUND)
     set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
     set(YAML_CPP_INSTALL    OFF CACHE BOOL "" FORCE)
+    # yaml-cpp 0.8.0 declares cmake_minimum_required(VERSION 3.4), which
+    # CMake >= 4 rejects; raise the floor only for this subproject.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(yaml-cpp)
+    unset(CMAKE_POLICY_VERSION_MINIMUM)
 endif()
 
 # ── Boost (headers only for Geometry, optional) ───────────────────────────────
