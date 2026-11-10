@@ -34,7 +34,7 @@ static fs::path write_od_csv(const fs::path& dir, const std::string& content,
 }
 
 // ── 1. Filter: window entirely before sim start ───────────────────────────────
-TEST_CASE("OD filter: window [0,3600) excluded when sim starts at 21600", "[od][filter]") {
+TEST_CASE("OD filter: window 0-3600 s excluded when sim starts at 21600", "[od][filter]") {
     auto tmp = fs::temp_directory_path() / "nomad_test_od1";
     fs::create_directories(tmp);
 
@@ -89,7 +89,7 @@ TEST_CASE("DepartureSampler::uniform stays within window", "[od][sampler]") {
 }
 
 // ── 4. Departure sampler: clamped window (partial overlap with sim start) ─────
-TEST_CASE("DepartureSampler::uniform with clamped start stays in [clamped, end)", "[od][sampler]") {
+TEST_CASE("DepartureSampler::uniform with clamped start stays within clamped start and end", "[od][sampler]") {
     std::mt19937 rng(42);
     // periodo 5 window [18000, 21600), sim starts at 21600.
     // After clamping: Uniform(21600, 21600) → degenerate → always 21600.
