@@ -408,7 +408,9 @@ void Simulation::handle_reroute(const Event& e) {
 
     Route r = r_ptr->route(req);
     if (r.is_valid && !r.edges.empty()) {
-        routes_.replace_suffix(a, hot_.route_pos[a], r.edges);
+        // route_pos indexes the edge the agent is on; the new route starts
+        // at that edge's target, so it replaces everything AFTER it.
+        routes_.replace_suffix(a, static_cast<uint16_t>(hot_.route_pos[a] + 1), r.edges);
         // Keep freeflow_route_s in sync with the rerouted path so the stuck
         // threshold (ratio × ff) is never exceeded by BPR-congested agents on
         // a longer but legitimate detour.
@@ -610,11 +612,15 @@ std::size_t Simulation::apply_reroute_batch(const std::vector<AgentId>& agents,
     for (std::size_t i = 0; i < agents.size(); ++i) {
         AgentId a = agents[i];
         if (!new_routes[i].is_valid || new_routes[i].edges.empty()) continue;
-        // Mid-trip reroute (OnLink) replaces only the remaining suffix from
-        // the agent's current position; pre-trip reroute (not yet departed)
-        // replaces the whole route from scratch (from_pos=0) — see
-        // schedule_pretrip_reroutes().
-        uint16_t from_pos = counts_toward_budget ? hot_.route_pos[a] : uint16_t{0};
+        // Mid-trip reroute (OnLink) keeps the edge the agent is on (index
+        // route_pos) and replaces what follows it: the new route starts at
+        // that edge's target. Replacing from route_pos itself dropped the
+        // current edge and made the agent skip the first new edge. Pre-trip
+        // reroute (not yet departed) replaces the whole route (from_pos=0) —
+        // see schedule_pretrip_reroutes().
+        uint16_t from_pos = counts_toward_budget
+                                ? static_cast<uint16_t>(hot_.route_pos[a] + 1)
+                                : uint16_t{0};
         routes_.replace_suffix(a, from_pos, new_routes[i].edges);
         // Keep freeflow_route_s in sync with the (re)routed path so the
         // stuck-agent teleport threshold (ratio × freeflow_route_s) is never

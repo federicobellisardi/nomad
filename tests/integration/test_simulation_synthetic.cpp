@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 
 using namespace nomad;
 
@@ -597,4 +598,82 @@ TEST_CASE("Simulation: pre-trip reroute diverts a later-departing agent around "
 
     REQUIRE(control_first_edge == 0);    // edge A: stale free-flow route, unchanged
     REQUIRE(treatment_first_edge == 2);  // edge C: diverted onto the safe path
+}
+
+// ── Mid-trip reroute must not skip an edge ───────────────────────────────────
+// Diamond (A=0, B=1, C=2, D=3 as in make_diamond) preceded by a long lead-in
+// edge L=4 (node 4 → node 0). An early wave saturates A; late agents are on L
+// when the periodic reroute scan sees A congested and are rerouted from
+// node 0 onto C→D. route_pos indexes the CURRENT edge, so the new suffix must
+// start right after it: every pair of consecutively entered edges has to be
+// contiguous in the graph (target(prev) == source(next)).
+static Graph make_lead_diamond() {
+    Graph g = make_diamond();
+    g.nodes.push_back({-1.0f, 0.0f, 0, 0, 0, 4});
+    g.row_ptr = {0, 2, 3, 4, 4, 5};
+    g.col_idx = {0, 2, 1, 3, 4};
+    EdgeData l{};
+    l.target = 0; l.length_m = 1000.0f; l.free_flow_speed = 10.0f; l.capacity = 10000.0f;
+    l.road_class = static_cast<uint8_t>(RoadClass::Primary);
+    g.edges.push_back(l);
+    g.geom_ptr.assign(6, 0);
+    return g;
+}
+
+TEST_CASE("Simulation: mid-trip reroute keeps the entered edge sequence contiguous",
+          "[integration][reroute]") {
+    namespace fs = std::filesystem;
+    auto graph = std::make_shared<Graph>(make_lead_diamond());
+
+    std::vector<NodeId> src(graph->num_edges());
+    for (NodeId u = 0; u < graph->num_nodes(); ++u)
+        for (EdgeId e : graph->out_edges(u)) src[e] = u;
+
+    SimulationConfig cfg;
+    cfg.start_time            = 0.0;
+    cfg.end_time              = 1200.0;
+    cfg.sync_window_s         = 5.0f;
+    cfg.reroute_interval_s    = 10.0f;
+    cfg.num_threads           = 1;
+    cfg.stuck_threshold_ratio = 0.0f;
+    cfg.stuck_max_hours       = 0.0f;
+    cfg.enable_pretrip_reroute = false;
+
+    LtmTrafficModel::Config lcfg;
+    lcfg.enable_discharge_cap = true;
+    lcfg.discharge_burst_s    = 1.0f;
+
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, lcfg));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+
+    auto od_path = fs::temp_directory_path() / "nomad_test_od_lead_diamond.csv";
+    {
+        std::ofstream f(od_path);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        f << "0,3,100,car,0,150\n";   // early wave saturating A
+        f << "4,3,5,car,200,210\n";   // late agents, on L during the reroute scans
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od_path)));
+
+    std::unordered_map<AgentId, std::vector<EdgeId>> entered;
+    sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
+        entered[e.agent].push_back(static_cast<EdgeId>(e.payload));
+    });
+
+    sim.run();
+    fs::remove(od_path);
+
+    uint32_t rerouted_late = 0;
+    for (AgentId a = 100; a < 105; ++a)
+        if (sim.agent_hot().reroute_count[a] > 0) ++rerouted_late;
+    REQUIRE(rerouted_late > 0);  // the scenario actually exercises mid-trip reroute
+
+    for (const auto& [a, seq] : entered) {
+        for (std::size_t i = 1; i < seq.size(); ++i) {
+            INFO("agent " << a << " step " << i << ": " << seq[i - 1] << " -> " << seq[i]);
+            REQUIRE(graph->edges[seq[i - 1]].target == src[seq[i]]);
+        }
+    }
 }
