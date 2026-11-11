@@ -5,6 +5,7 @@
 #include <nomad/core/graph.hpp>
 #include <nomad/core/types.hpp>
 #include <nomad/routing/router.hpp>  // RoutingRequest, used by apply_reroute_batch()
+#include <nomad/routing/td_costs.hpp>
 
 #include <array>
 #include <atomic>
@@ -88,6 +89,15 @@ public:
     void set_traffic_model(std::unique_ptr<ITrafficModel> m);
     void set_router(std::unique_ptr<IRouter> r);
     void add_output_writer(std::unique_ptr<IOutputWriter> w);
+
+    // Day-to-day assignment. set_td_costs(): pre-route cars on time-dependent
+    // link travel times from a previous iteration instead of free flow.
+    // enable_td_recording(): record experienced car link travel times by
+    // entry-time bin; write_td_costs() (after run) saves them, counting cars
+    // still on a link at the current time as censored observations.
+    void set_td_costs(std::shared_ptr<const TdCostTable> t) { td_in_ = std::move(t); }
+    void enable_td_recording(float bin_s);
+    void write_td_costs(const std::filesystem::path& p) const;
 
     // Register a callback invoked whenever an event of the given type fires.
     // Callbacks run on the thread pool — must be thread-safe.
@@ -183,6 +193,8 @@ private:
     std::unique_ptr<IRouter>            router_;
     // Traffic-aware A* used exclusively for en-route rerouting (CH keeps free-flow weights).
     std::unique_ptr<AStarRouter>        reroute_router_;
+    std::shared_ptr<const TdCostTable>  td_in_;
+    std::unique_ptr<TdCostRecorder>     td_rec_;
     std::vector<std::unique_ptr<IOutputWriter>> writers_;
 
     EventQueue     eq_;

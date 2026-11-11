@@ -254,6 +254,16 @@ static int run_scenario(ScenarioConfig cfg) {
         }
     }
 
+    // ── Day-to-day assignment inputs/outputs ──────────────────────────────────
+    if (!cfg.routing.td_costs_in.empty()) {
+        auto td = std::make_shared<TdCostTable>(TdCostTable::load(cfg.routing.td_costs_in));
+        if (td->num_edges() != graph->num_edges())
+            throw std::runtime_error("td_costs_in: edge count does not match the graph");
+        spdlog::info("Loaded time-dependent link costs from {}", cfg.routing.td_costs_in);
+        sim.set_td_costs(std::move(td));
+    }
+    if (!cfg.output.td_costs_out.empty()) sim.enable_td_recording(cfg.output.td_bin_s);
+
     // ── Run ───────────────────────────────────────────────────────────────────
     spdlog::info("Starting simulation: {:.0f}s – {:.0f}s",
                   cfg.simulation.start_time, cfg.simulation.end_time);
@@ -263,6 +273,7 @@ static int run_scenario(ScenarioConfig cfg) {
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
     spdlog::info("Simulation complete in {:.1f}s. Events processed: {}",
                   elapsed, sim.events_processed());
+    if (!cfg.output.td_costs_out.empty()) sim.write_td_costs(cfg.output.td_costs_out);
     if (ltm_model && cfg.traffic.ltm_stuck_time_s > 0.0f)
         spdlog::info("LTM stuck-time rule ({:.0f}s): {} squeezed exits",
                       cfg.traffic.ltm_stuck_time_s, ltm_model->squeezed_exits());

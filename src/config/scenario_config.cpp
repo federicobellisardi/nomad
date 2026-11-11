@@ -107,6 +107,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.routing.cache_entries    = r.value("cache_entries",   cfg.routing.cache_entries);
         cfg.routing.use_traffic_costs   = r.value("use_traffic_costs",   cfg.routing.use_traffic_costs);
         cfg.routing.randomization_sigma = r.value("randomization_sigma", cfg.routing.randomization_sigma);
+        cfg.routing.td_costs_in         = r.value("td_costs_in",         cfg.routing.td_costs_in);
         if (r.contains("ch_cache"))
             cfg.routing.ch_cache = r["ch_cache"].get<std::string>();
     }
@@ -196,6 +197,8 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.output.snapshot_interval_s = o.value("snapshot_interval_s", cfg.output.snapshot_interval_s);
         cfg.output.store_trajectories  = o.value("store_trajectories",  cfg.output.store_trajectories);
         cfg.output.store_link_stats    = o.value("store_link_stats",    cfg.output.store_link_stats);
+        cfg.output.td_costs_out        = o.value("td_costs_out",        cfg.output.td_costs_out);
+        cfg.output.td_bin_s            = o.value("td_bin_s",            cfg.output.td_bin_s);
     }
 
     log_summary(cfg);
@@ -246,6 +249,8 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["routing"]["reroute_threshold"]= cfg.routing.reroute_threshold;
     j["routing"]["cache_entries"]    = cfg.routing.cache_entries;
     j["routing"]["use_traffic_costs"]= cfg.routing.use_traffic_costs;
+    if (!cfg.routing.td_costs_in.empty())
+        j["routing"]["td_costs_in"]  = cfg.routing.td_costs_in;
 
     j["traffic"]["model"]                    = cfg.traffic.model;
     j["traffic"]["ltm_discharge_cap"]        = cfg.traffic.ltm_discharge_cap;
@@ -259,6 +264,10 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["output"]["output_dir"]          = cfg.output.output_dir.string();
     j["output"]["writers"]             = cfg.output.writers;
     j["output"]["snapshot_interval_s"] = cfg.output.snapshot_interval_s;
+    if (!cfg.output.td_costs_out.empty()) {
+        j["output"]["td_costs_out"]    = cfg.output.td_costs_out;
+        j["output"]["td_bin_s"]        = cfg.output.td_bin_s;
+    }
 
     std::ofstream f(json_path);
     f << j.dump(2);

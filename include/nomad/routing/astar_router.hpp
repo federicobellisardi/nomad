@@ -3,6 +3,7 @@
 #include <nomad/core/graph.hpp>
 #include <nomad/routing/route_cache.hpp>
 #include <nomad/routing/router.hpp>
+#include <nomad/routing/td_costs.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -53,8 +54,12 @@ public:
     // sigma = 0.05–0.10 produces route diversity across nearby junction
     // alternatives without major detours. Heuristic scaled by (1-sigma) to
     // remain admissible. Taylor approx avoids exp() for sigma <= 0.15.
+    // With td_costs != nullptr, car edge costs are time-dependent: the base cost of
+    // e is td_costs->cost(e, t0 + g, ff) where g is the (perturbed) cost-to-come,
+    // i.e. the travel time at which the car is expected to enter e.
     Route route_stochastic(NodeId origin, NodeId dest, AgentMode mode,
-                            uint32_t agent_seed, float sigma) const;
+                            uint32_t agent_seed, float sigma,
+                            const TdCostTable* td_costs = nullptr, double t0 = 0.0) const;
 
     std::string_view router_name() const override { return "A*"; }
 

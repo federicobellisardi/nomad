@@ -103,14 +103,18 @@ void Simulation::inject_demand() {
     // (seed - 42) so the default seed leaves the historical constant unchanged.
     const uint32_t route_seed_base = 0xCA7F00Du ^ ((cfg_.seed - 42u) * 0x85ebca6bu);
     std::unique_ptr<AStarRouter> stoch_router;
-    if (sigma > 0.0f) {
+    const TdCostTable* td = td_in_.get();
+    if (td) spdlog::info("Pre-routing cars on time-dependent link costs ({} bins of {:.0f}s)",
+                         td->num_bins(), td->bin_s());
+    if (sigma > 0.0f || td) {
         AStarRouter::Config stoch_cfg;
         stoch_cfg.use_traffic_costs = false;
         stoch_cfg.max_speed_ms      = 33.3f;
         stoch_cfg.walk_speed_ms     = cfg_.walk_speed_ms;
         stoch_cfg.bike_speed_ms     = cfg_.bike_speed_ms;
         stoch_router = std::make_unique<AStarRouter>(*graph_, nullptr, stoch_cfg);
-        spdlog::info("Per-edge stochastic pre-routing enabled (sigma={:.2f})", sigma);
+        if (sigma > 0.0f)
+            spdlog::info("Per-edge stochastic pre-routing enabled (sigma={:.2f})", sigma);
     }
 
     std::atomic<std::size_t> progress{0};
@@ -132,12 +136,16 @@ void Simulation::inject_demand() {
                     if (stoch_router) {
                         uint32_t seed = route_seed_base ^ (static_cast<uint32_t>(a) * 2654435761u);
                         Route r = stoch_router->route_stochastic(
-                            req.origin, req.destination, req.mode, seed, sigma);
+                            req.origin, req.destination, req.mode, seed, sigma,
+                            td, req.departure_time);
 
                         // Reject extreme detours: > 2× crow-fly AND > 5 km.
                         // Falls back to CH so bad hashes never lose an agent.
                         float haversine_m = graph_->haversine(req.origin, req.destination);
-                        bool too_long = r.estimated_dist_m > 2.0f * haversine_m
+                        // Not applied with time-dependent costs: a detour
+                        // around a queue is then a legitimate choice.
+                        bool too_long = !td
+                                        && r.estimated_dist_m > 2.0f * haversine_m
                                         && r.estimated_dist_m > 5000.0f;
                         if (r.is_valid && !r.edges.empty() && !too_long) {
                             route_results[a] = std::move(r);
@@ -363,6 +371,8 @@ void Simulation::handle_exit_link(const Event& e) {
         return;
     }
     if (traffic_ && hot_.mode[a] == AgentMode::Car) traffic_->record_exit(eid, e.time);
+    if (td_rec_ && hot_.mode[a] == AgentMode::Car)
+        td_rec_->record(eid, hot_.enter_time[a], e.time);
 
     hot_.route_pos[a] = pos;
 
@@ -496,6 +506,7 @@ void Simulation::teleport_stuck_agents(SimTime now) {
         if (eid < graph_->num_edges() && traffic_ && hot_.mode[a] == AgentMode::Car) {
             traffic_->force_remove(eid, a);
             traffic_->record_exit(eid, now);
+            if (td_rec_) td_rec_->record(eid, hot_.enter_time[a], now);
         }
 
         uint32_t rc = std::min<uint32_t>(hot_.reroute_count[a], teleported_by_reroute_count_.size() - 1);
@@ -1016,6 +1027,29 @@ const Graph& Simulation::graph() const {
 const ITrafficModel& Simulation::traffic() const {
     if (!traffic_) throw std::runtime_error("Traffic model not set");
     return *traffic_;
+}
+
+
+void Simulation::enable_td_recording(float bin_s) {
+    if (!graph_) throw std::runtime_error("enable_td_recording: graph not set");
+    td_rec_ = std::make_unique<TdCostRecorder>(
+        static_cast<uint32_t>(graph_->num_edges()), cfg_.start_time, cfg_.end_time, bin_s);
+}
+
+void Simulation::write_td_costs(const std::filesystem::path& p) const {
+    if (!td_rec_) throw std::runtime_error("write_td_costs: recording not enabled");
+    // Copy so the censored observations do not leak into a later run_until().
+    TdCostRecorder rec = *td_rec_;
+    const SimTime now = current_time_.load();
+    std::size_t censored = 0;
+    for (AgentId a = 0; a < static_cast<AgentId>(hot_.size()); ++a) {
+        if (hot_.state[a] != AgentState::OnLink || hot_.mode[a] != AgentMode::Car) continue;
+        rec.record(hot_.current_edge[a], hot_.enter_time[a], now);
+        ++censored;
+    }
+    rec.table().save(p);
+    spdlog::info("Time-dependent link costs written to {} ({} cars censored at t={:.0f}s)",
+                 p.string(), censored, now);
 }
 
 } // namespace nomad

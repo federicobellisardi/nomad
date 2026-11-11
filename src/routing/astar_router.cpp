@@ -255,7 +255,8 @@ Route AStarRouter::route_perturbed(NodeId origin, NodeId dest, AgentMode mode,
 // Taylor approx (1 + sigma*u) ≈ exp(sigma*u) holds to < 0.015% for sigma <= 0.10.
 // Admissible heuristic uses (1 - sigma) as the minimum possible multiplier.
 Route AStarRouter::route_stochastic(NodeId origin, NodeId dest, AgentMode mode,
-                                      uint32_t agent_seed, float sigma) const {
+                                      uint32_t agent_seed, float sigma,
+                                      const TdCostTable* td_costs, double t0) const {
     const uint32_t N = graph_.num_nodes();
     if (origin >= N || dest >= N) return {};
     if (origin == dest) { Route r; r.is_valid = true; return r; }
@@ -303,7 +304,9 @@ Route AStarRouter::route_stochastic(NodeId origin, NodeId dest, AgentMode mode,
             float noise = static_cast<float>(int32_t(h)) * (1.0f / 2147483648.0f);
             float mult  = 1.0f + sigma * noise;  // ≈ exp(sigma * noise) for sigma <= 0.15
 
-            float g_v = g_u + graph_.mode_free_flow_time(eid, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms) * mult;
+            float base = graph_.mode_free_flow_time(eid, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms);
+            if (td_costs && mode == AgentMode::Car) base = td_costs->cost(eid, t0 + g_u, base);
+            float g_v = g_u + base * mult;
             if (g_v < td.dist[v]) {
                 touch(v);
                 td.dist[v]      = g_v;

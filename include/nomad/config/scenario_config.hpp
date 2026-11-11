@@ -44,6 +44,9 @@ struct RoutingConfig {
     // sigma = std-dev of Normal before exp(); 0 = disabled (pure CH).
     // Recommended: 0.2–0.4 for cities with heavy motorway concentration.
     float randomization_sigma    = 0.0f;
+    // Day-to-day assignment: pre-route cars on these time-dependent link
+    // travel times (TdCostTable file from a previous iteration). Empty = off.
+    std::string td_costs_in;
 };
 
 struct TrafficConfig {
@@ -111,6 +114,10 @@ struct OutputConfig {
     bool store_trajectories = false; // full per-agent trajectories (large)
     bool store_link_stats   = true;
     bool store_activities   = false;
+    // Experienced car link travel times by entry-time bin (TdCostTable file),
+    // written at the end of the run. Empty = off.
+    std::string td_costs_out;
+    float       td_bin_s = 900.0f;
 };
 
 // ── Top-level scenario configuration ─────────────────────────────────────────

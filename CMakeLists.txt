@@ -33,6 +33,7 @@ add_library(nomad_core STATIC
     src/routing/astar_router.cpp
     src/routing/ch_router.cpp
     src/routing/route_cache.cpp
+    src/routing/td_costs.cpp
     src/demand/od_matrix.cpp
     src/demand/synthetic.cpp
     src/demand/activity_plan.cpp
