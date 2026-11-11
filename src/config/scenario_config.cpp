@@ -204,6 +204,8 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.output.store_link_stats    = o.value("store_link_stats",    cfg.output.store_link_stats);
         cfg.output.td_costs_out        = o.value("td_costs_out",        cfg.output.td_costs_out);
         cfg.output.td_bin_s            = o.value("td_bin_s",            cfg.output.td_bin_s);
+        if (o.contains("trace_edges"))
+            cfg.output.trace_edges = o["trace_edges"].get<std::vector<uint32_t>>();
     }
 
     log_summary(cfg);
@@ -276,6 +278,8 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
         j["output"]["td_costs_out"]    = cfg.output.td_costs_out;
         j["output"]["td_bin_s"]        = cfg.output.td_bin_s;
     }
+    if (!cfg.output.trace_edges.empty())
+        j["output"]["trace_edges"]     = cfg.output.trace_edges;
 
     std::ofstream f(json_path);
     f << j.dump(2);

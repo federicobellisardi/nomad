@@ -25,6 +25,7 @@ data/*
 
 # ── Simulation results ────────────────────────────────────────────────────────
 results/
+/results
 nomad_output/
 
 # ── CH cache (regenerate with --preprocess-ch) ────────────────────────────────

@@ -12,6 +12,9 @@
 #include <nomad/traffic/queue_model.hpp>
 
 #include <chrono>
+#include <fstream>
+#include <mutex>
+#include <unordered_set>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -265,6 +268,31 @@ static int run_scenario(ScenarioConfig cfg) {
         sim.set_td_costs(std::move(td));
     }
     if (!cfg.output.td_costs_out.empty()) sim.enable_td_recording(cfg.output.td_bin_s);
+    // ── Diagnostic edge traces (output only) ──────────────────────────────────
+    std::ofstream trace_out;
+    std::mutex    trace_mtx;
+    if (!cfg.output.trace_edges.empty()) {
+        auto path = cfg.output.output_dir / "edge_traces.csv";
+        trace_out.open(path);
+        trace_out << "t_s,agent,edge,route_pos,reroute_count,mode,route\n";
+        std::unordered_set<uint32_t> traced(cfg.output.trace_edges.begin(),
+                                            cfg.output.trace_edges.end());
+        spdlog::info("Tracing {} edges -> {}", traced.size(), path.string());
+        sim.register_hook(EventType::AgentEnterLink,
+            [&sim, &trace_out, &trace_mtx, traced](const Event& e) {
+                if (!traced.count(e.payload)) return;
+                const auto& hot = sim.agent_hot();
+                auto route = sim.route_store().get_route(e.agent);
+                std::lock_guard<std::mutex> lk(trace_mtx);
+                trace_out << e.time << ',' << e.agent << ',' << e.payload << ','
+                          << hot.route_pos[e.agent] << ','
+                          << static_cast<int>(hot.reroute_count[e.agent]) << ','
+                          << static_cast<int>(hot.mode[e.agent]) << ',';
+                for (std::size_t i = 0; i < route.size(); ++i)
+                    trace_out << (i ? ";" : "") << route[i];
+                trace_out << '\n';
+            });
+    }
 
     // ── Run ───────────────────────────────────────────────────────────────────
     spdlog::info("Starting simulation: {:.0f}s – {:.0f}s",

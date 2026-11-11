@@ -120,6 +120,10 @@ struct OutputConfig {
     // written at the end of the run. Empty = off.
     std::string td_costs_out;
     float       td_bin_s = 900.0f;
+    // Diagnostic: log every car/walk/bike entry onto these edges, with the
+    // agent's full current route, to <output_dir>/edge_traces.csv.
+    // Output only; does not affect the dynamics.
+    std::vector<uint32_t> trace_edges;
 };
 
 // ── Top-level scenario configuration ─────────────────────────────────────────
