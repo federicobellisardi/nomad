@@ -3,6 +3,7 @@
 #include <nomad/network/network_cleaner.hpp>
 
 // libosmium includes (PBF only — no expat dependency)
+#include <cstring>
 #include <osmium/handler.hpp>
 #include <osmium/io/pbf_input.hpp>
 #include <osmium/osm/node.hpp>
@@ -191,6 +192,13 @@ struct NomadWayHandler : osmium::handler::Handler {
         const bool car_class = defaults.klass <= RoadClass::Unclassified;
         // People on foot do not walk on motorways or trunk roads, and are not
         // bound by a street's one-way restriction.
+        // foot=no / foot=use_sidepath: walking on the way itself is not
+        // allowed (use_sidepath: a separately mapped sidewalk must be used).
+        const bool foot_forbidden = foot && (std::strcmp(foot, "no") == 0 ||
+                                             std::strcmp(foot, "use_sidepath") == 0);
+        // The contraflow link of a one-way way is still created when walking
+        // is forbidden (it inherits NoFoot from `flags` below): dropping it
+        // would change the cleaned topology and renumber the car graph.
         const bool walkable_car_class = car_class && defaults.klass >= RoadClass::Primary;
 
         // Speed
@@ -233,6 +241,7 @@ struct NomadWayHandler : osmium::handler::Handler {
         if (tunnel && std::string(tunnel) == "yes") flags |= EdgeFlags::Tunnel;
         const char* junc = way.tags()["junction"];
         if (junc && std::string(junc) == "roundabout") flags |= EdgeFlags::Roundabout;
+        if (foot_forbidden) flags |= EdgeFlags::NoFoot;
 
         // Name
         const char* name = way.tags()["name"];

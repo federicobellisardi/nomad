@@ -130,6 +130,20 @@ namespace EdgeFlags {
     inline constexpr uint8_t Tunnel         = 0x10;
     inline constexpr uint8_t Roundabout     = 0x20;
     inline constexpr uint8_t Reversed       = 0x40;
+    // Walking forbidden on this edge (OSM foot=no / foot=use_sidepath, or a
+    // merged chain that contains a segment people on foot may not use).
+    // Affects AgentMode::Walk only; the car graph ignores it.
+    inline constexpr uint8_t NoFoot         = 0x80;
+}
+
+// Full per-edge access check: road class rule plus per-edge flags.
+// Routers and demand generation must use this rather than
+// road_class_accessible() so that edge-level restrictions are honoured.
+inline constexpr bool edge_accessible(uint8_t road_class, uint8_t flags,
+                                      AgentMode mode) noexcept {
+    if (!road_class_accessible(static_cast<RoadClass>(road_class), mode)) return false;
+    if (mode == AgentMode::Walk && (flags & EdgeFlags::NoFoot)) return false;
+    return true;
 }
 
 } // namespace nomad

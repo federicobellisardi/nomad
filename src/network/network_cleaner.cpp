@@ -324,6 +324,12 @@ void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
                                                       g.edges[out_e].free_flow_speed);
             g.edges[in_e].capacity        = std::min(g.edges[in_e].capacity,
                                                       g.edges[out_e].capacity);
+            // The merged edge keeps in_e's road class (car graph unchanged),
+            // but walking it means walking every absorbed segment: it is
+            // walkable only if all of them are.
+            if (!edge_accessible(g.edges[out_e].road_class, g.edges[out_e].flags,
+                                 AgentMode::Walk))
+                g.edges[in_e].flags |= EdgeFlags::NoFoot;
 
             // Track the redirected edge so Y knows about it
             in_edges[Y].push_back(in_e);

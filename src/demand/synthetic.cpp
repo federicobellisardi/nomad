@@ -15,8 +15,8 @@ static std::vector<NodeId> accessible_nodes(const Graph& g, AgentMode mode) {
     result.reserve(g.num_nodes() / 2);
     for (uint32_t u = 0; u < g.num_nodes(); ++u) {
         for (EdgeId eid : g.out_edges(u)) {
-            auto klass = static_cast<RoadClass>(g.edges[eid].road_class);
-            if (road_class_accessible(klass, mode)) {
+            const auto& ed = g.edges[eid];
+            if (edge_accessible(ed.road_class, ed.flags, mode)) {
                 result.push_back(u);
                 break; // at least one accessible edge → node is usable
             }

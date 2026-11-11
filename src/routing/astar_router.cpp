@@ -114,7 +114,7 @@ Route AStarRouter::astar_query(NodeId origin, NodeId dest, AgentMode mode) const
             if (v >= N) continue;
             if (td.visited[v]) continue;
             // Mode filter: skip edges not accessible to this agent's mode
-            if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), mode))
+            if (!edge_accessible(ed.road_class, ed.flags, mode))
                 continue;
 
             float g_v = g_u + edge_cost(eid, mode);
@@ -208,7 +208,7 @@ Route AStarRouter::route_perturbed(NodeId origin, NodeId dest, AgentMode mode,
             const EdgeData& ed = graph_.edges[eid];
             NodeId v = ed.target;
             if (v >= N || td.visited[v]) continue;
-            if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), mode)) continue;
+            if (!edge_accessible(ed.road_class, ed.flags, mode)) continue;
 
             float mult = (ed.road_class < static_cast<uint8_t>(kNumRoadClasses))
                           ? class_mult[ed.road_class] : 1.0f;
@@ -295,7 +295,7 @@ Route AStarRouter::route_stochastic(NodeId origin, NodeId dest, AgentMode mode,
             const EdgeData& ed = graph_.edges[eid];
             NodeId v = ed.target;
             if (v >= N || td.visited[v]) continue;
-            if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), mode)) continue;
+            if (!edge_accessible(ed.road_class, ed.flags, mode)) continue;
 
             // Deterministic per-(agent,edge) noise: Knuth multiplicative hash
             // Maps uint32 → signed → [-1, 1] → multiply by sigma

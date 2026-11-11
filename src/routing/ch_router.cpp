@@ -135,7 +135,7 @@ void CHRouter::preprocess() {
         for (EdgeId eid : graph_.out_edges(u)) {
             const auto& e = graph_.edges[eid];
             if (e.target == kInvalidNode) continue;
-            if (!road_class_accessible(static_cast<RoadClass>(e.road_class), pp_cfg_.mode))
+            if (!edge_accessible(e.road_class, e.flags, pp_cfg_.mode))
                 continue;
             float cost = e.free_flow_speed > 0
                 ? e.length_m / e.free_flow_speed : kInf;
@@ -297,7 +297,7 @@ void CHRouter::build_augmented_graph() {
         for (EdgeId eid : graph_.out_edges(u)) {
             const auto& ed = graph_.edges[eid];
             if (ed.target == kInvalidNode) continue;
-            if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), pp_cfg_.mode))
+            if (!edge_accessible(ed.road_class, ed.flags, pp_cfg_.mode))
                 continue;
             float cost = ed.free_flow_speed > 0
                 ? ed.length_m / ed.free_flow_speed : kInf;
@@ -334,7 +334,7 @@ void CHRouter::build_augmented_graph() {
         for (EdgeId eid : graph_.out_edges(u)) {
             const auto& ed = graph_.edges[eid];
             if (ed.target == kInvalidNode) continue;
-            if (!road_class_accessible(static_cast<RoadClass>(ed.road_class), pp_cfg_.mode))
+            if (!edge_accessible(ed.road_class, ed.flags, pp_cfg_.mode))
                 continue;
             float cost = ed.free_flow_speed > 0
                 ? ed.length_m / ed.free_flow_speed : kInf;
