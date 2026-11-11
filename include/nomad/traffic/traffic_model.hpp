@@ -133,6 +133,25 @@ public:
     // storage/spillback concept (QueueTrafficModel) accept unconditionally.
     virtual bool has_capacity(EdgeId e) const { (void)e; return true; }
 
+    // ── Movement-aware variants (default: fall back to the plain versions) ──
+    // `next` is the edge the agent will take AFTER e (kInvalidEdge if e is
+    // its last edge). Models with per-movement storage (LTM with
+    // movement_storage) use it; the others ignore it.
+    virtual bool has_capacity_for(EdgeId e, EdgeId next) const {
+        (void)next; return has_capacity(e);
+    }
+    // Exit from e into `next`, where `next_after` is the edge the agent will
+    // take after `next` (used for the spillback check on `next`).
+    virtual bool on_exit_to(EdgeId e, EdgeId next, EdgeId next_after, AgentId a, SimTime t) {
+        (void)next_after; return on_exit(e, next, a, t);
+    }
+    // Record (or update, after a reroute) the movement e -> next of an agent
+    // currently on e. Called right after on_enter() and after a mid-link
+    // reroute. Released by a successful exit or force_remove().
+    virtual void assign_movement(EdgeId e, AgentId a, EdgeId next) {
+        (void)e; (void)a; (void)next;
+    }
+
     virtual std::string_view model_name() const = 0;
 
     // ── Counted throughput (see EdgeCounters) ────────────────────────────────

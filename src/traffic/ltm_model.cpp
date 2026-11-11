@@ -35,6 +35,62 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
         }
         states_[e].travel_time_s.store(graph.free_flow_time(e), std::memory_order_relaxed);
     }
+
+    if (cfg_.movement_storage) {
+        lanes_.resize(E);
+        mv_off_.resize(E + 1);
+        uint32_t off = 0;
+        for (uint32_t e = 0; e < E; ++e) {
+            lanes_[e]  = std::max(1.0f, graph.edges[e].capacity / 1600.0f);
+            mv_off_[e] = off;
+            NodeId u = graph.edges[e].target;
+            if (u < graph.num_nodes()) off += graph.row_ptr[u + 1] - graph.row_ptr[u];
+        }
+        mv_off_[E] = off;
+        mv_occ_.assign(off, 0);
+    }
+}
+
+uint32_t LtmTrafficModel::movement_slot(EdgeId e, EdgeId next) const {
+    if (e >= graph_.num_edges() || next == kInvalidEdge) return kNoSlot;
+    NodeId u = graph_.edges[e].target;
+    if (u >= graph_.num_nodes()) return kNoSlot;
+    const uint32_t b = graph_.row_ptr[u], end = graph_.row_ptr[u + 1];
+    for (uint32_t k = b; k < end; ++k)
+        if (graph_.col_idx[k] == next) return mv_off_[e] + (k - b);
+    return kNoSlot;
+}
+
+float LtmTrafficModel::movement_cap(EdgeId e, EdgeId next) const {
+    float share = std::min(1.0f, lanes_[next] / lanes_[e]);
+    return std::max(1.0f, cells_[e].storage_veh * share);
+}
+
+void LtmTrafficModel::release_movement(AgentId a) {
+    if (a >= agent_slot_.size()) return;
+    uint32_t s = agent_slot_[a];
+    if (s == kNoSlot) return;
+    if (mv_occ_[s] > 0) --mv_occ_[s];
+    agent_slot_[a] = kNoSlot;
+}
+
+void LtmTrafficModel::assign_movement(EdgeId e, AgentId a, EdgeId next) {
+    if (!cfg_.movement_storage) return;
+    if (a >= agent_slot_.size())
+        agent_slot_.resize(std::max<std::size_t>(a + 1, agent_slot_.size() * 2), kNoSlot);
+    release_movement(a);
+    uint32_t s = movement_slot(e, next);
+    if (s == kNoSlot) return;
+    ++mv_occ_[s];
+    agent_slot_[a] = s;
+}
+
+bool LtmTrafficModel::has_capacity_for(EdgeId e, EdgeId next) const {
+    if (!has_capacity(e)) return false;
+    if (!cfg_.movement_storage) return true;
+    uint32_t s = movement_slot(e, next);
+    if (s == kNoSlot) return true;
+    return static_cast<float>(mv_occ_[s]) < movement_cap(e, next);
 }
 
 float LtmTrafficModel::travel_time_for(EdgeId e) const {
@@ -70,6 +126,13 @@ SimTime LtmTrafficModel::on_enter(EdgeId e, AgentId /*a*/, SimTime t) {
 
     float tt = travel_time_for(e);
     states_[e].travel_time_s.store(tt, std::memory_order_relaxed);
+    // With movement storage, the exit-gate wait of whatever movement is
+    // blocked at the head of the link must not delay vehicles heading to a
+    // free movement: their scheduled exit uses the link travel time without
+    // the gate term. Vehicles of the blocked movement still wait, through
+    // the 1 s exit retries. The published travel_time_s keeps the gate term
+    // as the congestion signal for rerouting.
+    if (cfg_.movement_storage) return t + (tt - c.gate_wait_s);
     return t + tt;
 }
 
@@ -79,7 +142,12 @@ bool LtmTrafficModel::has_capacity(EdgeId e) const {
     return c.storage_veh - static_cast<float>(c.occupancy) > 0.0f;
 }
 
-bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId /*a*/, SimTime t) {
+bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId a, SimTime t) {
+    return on_exit_to(e, next, kInvalidEdge, a, t);
+}
+
+bool LtmTrafficModel::on_exit_to(EdgeId e, EdgeId next, EdgeId next_after,
+                                 AgentId a, SimTime t) {
     if (e >= graph_.num_edges()) return true;
     Cell& c = cells_[e];
 
@@ -101,7 +169,7 @@ bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId /*a*/, SimTime t) {
     // lets congestion genuinely propagate backward instead of only raising
     // the current link's own travel time. Always active, not opt-in.
     bool spillback_blocked =
-        next != kInvalidEdge && next < graph_.num_edges() && !has_capacity(next);
+        next != kInvalidEdge && next < graph_.num_edges() && !has_capacity_for(next, next_after);
 
     // Sending-side discharge-rate cap (opt-in). A rigid per-exit headway
     // here was tried once and caused near-total gridlock (see header
@@ -125,15 +193,17 @@ bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId /*a*/, SimTime t) {
     c.gate_wait_s = 0.0f;
 
     if (c.occupancy > 0) --c.occupancy;
+    release_movement(a);
     states_[e].occupancy.store(static_cast<float>(c.occupancy), std::memory_order_relaxed);
     states_[e].outflow_rate.store(c.capacity_veh_s, std::memory_order_relaxed);
     return true;
 }
 
-void LtmTrafficModel::force_remove(EdgeId e, AgentId /*a*/) {
+void LtmTrafficModel::force_remove(EdgeId e, AgentId a) {
     if (e >= graph_.num_edges()) return;
     Cell& c = cells_[e];
     if (c.occupancy > 0) --c.occupancy;
+    release_movement(a);
     states_[e].occupancy.store(static_cast<float>(c.occupancy), std::memory_order_relaxed);
     states_[e].travel_time_s.store(travel_time_for(e), std::memory_order_relaxed);
 }

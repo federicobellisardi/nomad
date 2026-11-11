@@ -169,6 +169,8 @@ private:
                                       bool counts_toward_budget);
     void teleport_stuck_agents      (SimTime now);
     void fire_hooks                 (EventType type, const Event& e);
+    // Edge the agent takes after the one it is on (kInvalidEdge at trip end).
+    EdgeId next_edge_after_current(AgentId a) const;
 
     // Compute next route for an agent (CH or A* depending on router_)
     std::vector<EdgeId> compute_route(AgentId a);

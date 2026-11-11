@@ -8,6 +8,7 @@ add_executable(nomad_tests
     unit/test_network_cleaner.cpp
     unit/test_intersection.cpp
     unit/test_walk_access.cpp
+    unit/test_movement_storage.cpp
     integration/test_simulation_synthetic.cpp
 )
 

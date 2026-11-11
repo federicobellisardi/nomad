@@ -263,7 +263,9 @@ void Simulation::handle_depart(const Event& e) {
         // n_enter_/fire_hooks are done here explicitly since this path never
         // dispatches a genuine AgentEnterLink event (handle_event's switch,
         // which normally does both, is bypassed for this transition).
-        if (traffic_ && hot_.mode[a] == AgentMode::Car && !traffic_->has_capacity(pre_edges[0])) {
+        if (traffic_ && hot_.mode[a] == AgentMode::Car &&
+            !traffic_->has_capacity_for(pre_edges[0],
+                                        pre_edges.size() > 1 ? pre_edges[1] : kInvalidEdge)) {
             ++n_depart_rejected_;
             eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
             return;
@@ -291,7 +293,9 @@ void Simulation::handle_depart(const Event& e) {
         return;
     }
 
-    if (traffic_ && hot_.mode[a] == AgentMode::Car && !traffic_->has_capacity(route.edges[0])) {
+    if (traffic_ && hot_.mode[a] == AgentMode::Car &&
+        !traffic_->has_capacity_for(route.edges[0],
+                                    route.edges.size() > 1 ? route.edges[1] : kInvalidEdge)) {
         ++n_depart_rejected_;
         eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
         return;
@@ -302,6 +306,13 @@ void Simulation::handle_depart(const Event& e) {
     enter_edge_now(a, route.edges[0], e.time);
     ++n_enter_;
     fire_hooks(EventType::AgentEnterLink, {e.time, a, route.edges[0], EventType::AgentEnterLink, {}});
+}
+
+EdgeId Simulation::next_edge_after_current(AgentId a) const {
+    if (a >= routes_.routes.size()) return kInvalidEdge;
+    const auto& r = routes_.routes[a];
+    std::size_t k = static_cast<std::size_t>(hot_.route_pos[a]) + 1;
+    return k < r.size() ? r[k] : kInvalidEdge;
 }
 
 void Simulation::enter_edge_now(AgentId a, EdgeId eid, SimTime t) {
@@ -316,6 +327,7 @@ void Simulation::enter_edge_now(AgentId a, EdgeId eid, SimTime t) {
     if (traffic_ && hot_.mode[a] == AgentMode::Car) {
         exit_time = traffic_->on_enter(eid, a, t);
         traffic_->record_enter(eid, t);
+        traffic_->assign_movement(eid, a, next_edge_after_current(a));
     } else {
         exit_time = t + graph_->mode_free_flow_time(
             eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
@@ -340,9 +352,11 @@ void Simulation::handle_exit_link(const Event& e) {
     uint16_t pos  = hot_.route_pos[a] + 1;
     auto     route = routes_.get_route(a);
     EdgeId   next  = (pos < route.size()) ? route[pos] : kInvalidEdge;
+    EdgeId   next_after = (pos + 1u < route.size()) ? route[pos + 1u] : kInvalidEdge;
 
     bool can_exit = true;
-    if (traffic_ && hot_.mode[a] == AgentMode::Car) can_exit = traffic_->on_exit(eid, next, a, e.time);
+    if (traffic_ && hot_.mode[a] == AgentMode::Car)
+        can_exit = traffic_->on_exit_to(eid, next, next_after, a, e.time);
 
     if (!can_exit) {
         eq_.push({e.time + 1.0, a, eid, EventType::AgentExitLink, {}});
@@ -411,6 +425,8 @@ void Simulation::handle_reroute(const Event& e) {
         // route_pos indexes the edge the agent is on; the new route starts
         // at that edge's target, so it replaces everything AFTER it.
         routes_.replace_suffix(a, static_cast<uint16_t>(hot_.route_pos[a] + 1), r.edges);
+        if (traffic_ && hot_.mode[a] == AgentMode::Car && hot_.state[a] == AgentState::OnLink)
+            traffic_->assign_movement(hot_.current_edge[a], a, next_edge_after_current(a));
         // Keep freeflow_route_s in sync with the rerouted path so the stuck
         // threshold (ratio × ff) is never exceeded by BPR-congested agents on
         // a longer but legitimate detour.
@@ -622,6 +638,9 @@ std::size_t Simulation::apply_reroute_batch(const std::vector<AgentId>& agents,
                                 ? static_cast<uint16_t>(hot_.route_pos[a] + 1)
                                 : uint16_t{0};
         routes_.replace_suffix(a, from_pos, new_routes[i].edges);
+        if (counts_toward_budget && traffic_ && hot_.mode[a] == AgentMode::Car &&
+            hot_.state[a] == AgentState::OnLink)
+            traffic_->assign_movement(hot_.current_edge[a], a, next_edge_after_current(a));
         // Keep freeflow_route_s in sync with the (re)routed path so the
         // stuck-agent teleport threshold (ratio × freeflow_route_s) is never
         // exceeded by a longer but legitimate detour.

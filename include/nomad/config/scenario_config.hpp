@@ -54,6 +54,7 @@ struct TrafficConfig {
     // full rationale). Ignored when model != "ltm". Default OFF.
     bool  ltm_discharge_cap     = false;
     float ltm_discharge_burst_s = 10.0f;
+    bool  ltm_movement_storage  = false;  // see LtmTrafficModel::Config::movement_storage
 };
 
 struct DemandConfig {

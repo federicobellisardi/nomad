@@ -97,6 +97,7 @@ static int run_scenario(ScenarioConfig cfg) {
         LtmTrafficModel::Config ltm_cfg;
         ltm_cfg.enable_discharge_cap = cfg.traffic.ltm_discharge_cap;
         ltm_cfg.discharge_burst_s    = cfg.traffic.ltm_discharge_burst_s;
+        ltm_cfg.movement_storage     = cfg.traffic.ltm_movement_storage;
         sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, ltm_cfg));
     } else {
         sim.set_traffic_model(std::make_unique<QueueTrafficModel>(*graph));

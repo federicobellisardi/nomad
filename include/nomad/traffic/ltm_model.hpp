@@ -71,6 +71,14 @@ public:
         // Larger -> more tolerant of platoons before throttling kicks in;
         // smaller converges toward a rigid headway (avoid going too small).
         float discharge_burst_s   = 10.0f;
+
+        // Movement-share storage (opt-in). Vehicles on link e heading to
+        // next link n may hold at most storage(e) * min(1, lanes(n)/lanes(e))
+        // (>= 1 vehicle), lanes = max(1, capacity/1600). Without it a queue
+        // for a narrow movement (1-lane off-ramp) can fill a wide link and
+        // block every other movement (diverge blocking), which collapsed the
+        // Ma-20 in the Palma evening runs. Total storage still applies.
+        bool  movement_storage    = false;
     };
 
     explicit LtmTrafficModel(const Graph& graph);
@@ -84,6 +92,10 @@ public:
     std::span<const LinkState> link_states()  const                   override;
     std::string_view model_name()            const  override { return "ltm"; }
     bool    has_capacity(EdgeId e) const                              override;
+    bool    has_capacity_for(EdgeId e, EdgeId next) const               override;
+    bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
+                         AgentId a, SimTime t)                            override;
+    void    assign_movement(EdgeId e, AgentId a, EdgeId next)            override;
 
 private:
     struct Cell {
@@ -118,6 +130,19 @@ private:
     std::vector<LinkState> states_;
 
     // Dirty active-edge set — same pattern as QueueTrafficModel::update().
+    // Movement-share storage (cfg_.movement_storage). For link e, the
+    // movements are the out-edges of target(e), i.e. CSR positions
+    // row_ptr[target(e)] .. row_ptr[target(e)+1); their occupancy counters
+    // live at mv_occ_[mv_off_[e] + (pos - row_ptr[target(e)])].
+    static constexpr uint32_t kNoSlot = 0xFFFFFFFFu;
+    uint32_t movement_slot(EdgeId e, EdgeId next) const;
+    float    movement_cap (EdgeId e, EdgeId next) const;
+    void     release_movement(AgentId a);
+    std::vector<float>    lanes_;
+    std::vector<uint32_t> mv_off_;
+    std::vector<int32_t>  mv_occ_;
+    std::vector<uint32_t> agent_slot_;   // per agent, kNoSlot if none
+
     std::vector<uint8_t> is_active_;
     std::vector<EdgeId>  active_list_;
 };
