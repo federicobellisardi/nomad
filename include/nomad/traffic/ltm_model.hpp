@@ -79,6 +79,14 @@ public:
         // block every other movement (diverge blocking), which collapsed the
         // Ma-20 in the Palma evening runs. Total storage still applies.
         bool  movement_storage    = false;
+
+        // Gridlock resolution (opt-in, 0 = off). When the exit of link e has
+        // been continuously blocked by downstream spillback for at least
+        // stuck_time_s, the head vehicle enters the next link anyway, over its
+        // storage (same idea as MATSim's qsim stuckTime). The block timer
+        // restarts after every exit, so a blocked link releases at most one
+        // vehicle per stuck_time_s. The discharge-rate gate is never bypassed.
+        float stuck_time_s        = 0.0f;
     };
 
     explicit LtmTrafficModel(const Graph& graph);
@@ -96,6 +104,9 @@ public:
     bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
                          AgentId a, SimTime t)                            override;
     void    assign_movement(EdgeId e, AgentId a, EdgeId next)            override;
+
+    // Exits forced through a blocked spillback gate by the stuck_time_s rule.
+    uint64_t squeezed_exits() const { return n_squeezed_; }
 
 private:
     struct Cell {
@@ -128,6 +139,7 @@ private:
     Config               cfg_;
     std::vector<Cell>    cells_;
     std::vector<LinkState> states_;
+    uint64_t             n_squeezed_{0};
 
     // Dirty active-edge set — same pattern as QueueTrafficModel::update().
     // Movement-share storage (cfg_.movement_storage). For link e, the

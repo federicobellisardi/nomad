@@ -177,6 +177,14 @@ bool LtmTrafficModel::on_exit_to(EdgeId e, EdgeId next, EdgeId next_after,
     // discharge_burst_s worth of capacity, not on isolated exits.
     bool discharge_blocked = cfg_.enable_discharge_cap && c.discharge_credit < 1.0f;
 
+    // Stuck-time rule: a spillback block that has lasted stuck_time_s is
+    // overridden (the downstream link goes over storage by one vehicle).
+    if (spillback_blocked && !discharge_blocked && cfg_.stuck_time_s > 0.0f &&
+        c.gate_block_since >= 0.0 && t - c.gate_block_since >= cfg_.stuck_time_s) {
+        spillback_blocked = false;
+        ++n_squeezed_;
+    }
+
     if (spillback_blocked || discharge_blocked) {
         // Gate is binding (from either cause): start (or continue) tracking
         // how long the head-of-queue exit has been continuously blocked --

@@ -9,6 +9,7 @@ add_executable(nomad_tests
     unit/test_intersection.cpp
     unit/test_walk_access.cpp
     unit/test_movement_storage.cpp
+    unit/test_stuck_time.cpp
     integration/test_simulation_synthetic.cpp
 )
 

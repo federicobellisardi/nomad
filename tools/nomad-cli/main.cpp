@@ -93,12 +93,16 @@ static int run_scenario(ScenarioConfig cfg) {
     sim.set_graph(graph);
 
     // ── Traffic model ─────────────────────────────────────────────────────────
+    const LtmTrafficModel* ltm_model = nullptr;   // owned by sim
     if (cfg.traffic.model == "ltm") {
         LtmTrafficModel::Config ltm_cfg;
         ltm_cfg.enable_discharge_cap = cfg.traffic.ltm_discharge_cap;
         ltm_cfg.discharge_burst_s    = cfg.traffic.ltm_discharge_burst_s;
         ltm_cfg.movement_storage     = cfg.traffic.ltm_movement_storage;
-        sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, ltm_cfg));
+        ltm_cfg.stuck_time_s         = cfg.traffic.ltm_stuck_time_s;
+        auto ltm = std::make_unique<LtmTrafficModel>(*graph, ltm_cfg);
+        ltm_model = ltm.get();
+        sim.set_traffic_model(std::move(ltm));
     } else {
         sim.set_traffic_model(std::make_unique<QueueTrafficModel>(*graph));
     }
@@ -259,6 +263,9 @@ static int run_scenario(ScenarioConfig cfg) {
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
     spdlog::info("Simulation complete in {:.1f}s. Events processed: {}",
                   elapsed, sim.events_processed());
+    if (ltm_model && cfg.traffic.ltm_stuck_time_s > 0.0f)
+        spdlog::info("LTM stuck-time rule ({:.0f}s): {} squeezed exits",
+                      cfg.traffic.ltm_stuck_time_s, ltm_model->squeezed_exits());
     return 0;
 }
 
