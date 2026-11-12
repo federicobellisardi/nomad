@@ -140,3 +140,28 @@ TEST_CASE("NetworkCleaner: nodes_simplified never exceeds nodes_before (closed r
     REQUIRE(report.nodes_simplified <= report.nodes_before);
     REQUIRE(out.num_nodes() >= 1);
 }
+
+// Parallel street + footway between the same two nodes with equal capacity:
+// the street (car-accessible) must survive deduplication.
+TEST_CASE("NetworkCleaner: duplicate removal keeps the car edge on a capacity tie", "[network]") {
+    for (int order = 0; order < 2; ++order) {
+        Graph g;
+        g.nodes.resize(2);
+        g.nodes[0] = {0.0f, 0.0f, 0, 0, 0, 0};
+        g.nodes[1] = {1.0f, 0.0f, 0, 0, 0, 1};
+        EdgeData street = make_edge(1, 100.0f, 10.0f, 600.0f);
+        street.road_class = static_cast<uint8_t>(RoadClass::Residential);
+        EdgeData foot = make_edge(1, 100.0f, 1.4f, 600.0f);
+        foot.road_class = static_cast<uint8_t>(RoadClass::Footway);
+        g.row_ptr = {0, 2, 2};
+        g.col_idx = {0, 1};
+        g.edges = order == 0 ? std::vector<EdgeData>{foot, street} : std::vector<EdgeData>{street, foot};
+        g.geom_ptr.assign(3, 0);
+        NetworkCleaner::Config cfg = permissive_cfg();
+        cfg.simplify_topology = false;
+        NetworkCleaner cleaner(cfg);
+        Graph out = cleaner.clean(std::move(g));
+        REQUIRE(out.num_edges() == 1);
+        REQUIRE(out.edges[0].road_class == static_cast<uint8_t>(RoadClass::Residential));
+    }
+}

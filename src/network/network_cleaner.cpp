@@ -136,9 +136,15 @@ void NetworkCleaner::remove_duplicate_edges(Graph& g) {
             if (v == kInvalidNode) continue;
             auto [it, inserted] = seen.emplace(v, eid);
             if (!inserted) {
-                // Keep the higher-capacity/speed edge
+                // Keep the car-accessible edge, then the higher-capacity one.
+                // Capacity alone let a parallel footway win a tie against a
+                // street and silently remove the car link.
                 const EdgeId prev = it->second;
-                if (g.edges[eid].capacity > g.edges[prev].capacity) {
+                const auto& a = g.edges[eid];
+                const auto& b = g.edges[prev];
+                const bool car_a = edge_accessible(a.road_class, a.flags, AgentMode::Car);
+                const bool car_b = edge_accessible(b.road_class, b.flags, AgentMode::Car);
+                if (car_a != car_b ? car_a : a.capacity > b.capacity) {
                     g.edges[prev].target = kInvalidNode;
                     it->second = eid;
                 } else {
