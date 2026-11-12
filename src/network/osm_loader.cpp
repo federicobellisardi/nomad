@@ -210,18 +210,6 @@ struct NomadWayHandler : osmium::handler::Handler {
         }
         if (speed_ms < 0) speed_ms = defaults.default_speed_kmh / 3.6f;
 
-        // Lanes
-        int lanes = defaults.default_lanes;
-        const char* lanes_tag = way.tags()["lanes"];
-        if (lanes_tag) {
-            int l = 0;
-            auto r = std::from_chars(lanes_tag, lanes_tag + strlen(lanes_tag), l);
-            if (r.ec == std::errc() && l > 0) lanes = l;
-        }
-
-        // Capacity
-        float capacity = lanes * defaults.capacity_per_lane_veh_h;
-
         // Oneway
         const char* oneway = way.tags()["oneway"];
         bool is_oneway = oneway && (std::string(oneway) == "yes" ||
@@ -241,6 +229,42 @@ struct NomadWayHandler : osmium::handler::Handler {
         // Links that carry no cars (footway, path, pedestrian street, ...) are
         // always two-way.
         if (!car_class) { is_oneway = false; reversed = false; }
+
+        // Lanes per direction. OSM `lanes` counts both directions of a
+        // two-way way (OSM wiki "Key:lanes"); lanes:forward / lanes:backward
+        // give the split, lanes:both_ways (centre turn lane) belongs to
+        // neither. Without a split the remainder is shared evenly (may be
+        // fractional). Untagged ways keep the class default, read as lanes
+        // per direction. Capacity = lanes per direction x per-lane capacity.
+        auto parse_lanes = [&](const char* key) -> float {
+            const char* v = way.tags()[key];
+            if (!v) return -1.0f;
+            int l = 0;
+            auto r = std::from_chars(v, v + std::strlen(v), l);
+            return (r.ec == std::errc() && l > 0) ? static_cast<float>(l) : -1.0f;
+        };
+        const float dflt     = static_cast<float>(defaults.default_lanes);
+        const float total    = parse_lanes("lanes");
+        float lanes_fwd = dflt, lanes_bwd = dflt;
+        if (is_oneway || reversed) {
+            if (total > 0) lanes_fwd = lanes_bwd = total;
+        } else {
+            const float lf = parse_lanes("lanes:forward");
+            const float lb = parse_lanes("lanes:backward");
+            float both = parse_lanes("lanes:both_ways");
+            if (both < 0) both = 0.0f;
+            const float rest = total > 0 ? total - both : -1.0f;
+            if (lf > 0)                 lanes_fwd = lf;
+            else if (rest > 0 && lb > 0) lanes_fwd = rest - lb;
+            else if (rest > 0)          lanes_fwd = rest / 2.0f;
+            if (lb > 0)                 lanes_bwd = lb;
+            else if (rest > 0 && lf > 0) lanes_bwd = rest - lf;
+            else if (rest > 0)          lanes_bwd = rest / 2.0f;
+            lanes_fwd = std::max(1.0f, lanes_fwd);
+            lanes_bwd = std::max(1.0f, lanes_bwd);
+        }
+        const float cap_fwd = lanes_fwd * defaults.capacity_per_lane_veh_h;
+        const float cap_bwd = lanes_bwd * defaults.capacity_per_lane_veh_h;
 
         // Flags
         uint8_t flags = 0;
@@ -300,7 +324,8 @@ struct NomadWayHandler : osmium::handler::Handler {
             fwd.to_node   = reversed ? nA.ref() : nB.ref();
             fwd.length_m  = length_m;
             fwd.speed_ms  = speed_ms;
-            fwd.capacity  = capacity;
+            fwd.capacity  = cap_fwd;
+            fwd.lanes     = lanes_fwd;
             fwd.road_class= static_cast<uint8_t>(defaults.klass);
             fwd.flags     = flags;
             fwd.way_meta_idx = meta_idx;
@@ -313,6 +338,8 @@ struct NomadWayHandler : osmium::handler::Handler {
                 rev.from_node = nB.ref();
                 rev.to_node   = nA.ref();
                 rev.flags     |= EdgeFlags::Reversed;
+                rev.capacity  = cap_bwd;
+                rev.lanes     = lanes_bwd;
                 raw_edges.push_back(rev);
             } else if (walkable_car_class) {
                 // One-way street: cars go one way, people on foot both. The
@@ -324,6 +351,7 @@ struct NomadWayHandler : osmium::handler::Handler {
                 rev.road_class = static_cast<uint8_t>(footway.klass);
                 rev.speed_ms  = footway.default_speed_kmh / 3.6f;
                 rev.capacity  = footway.default_lanes * footway.capacity_per_lane_veh_h;
+                rev.lanes     = static_cast<float>(footway.default_lanes);
                 rev.flags     = static_cast<uint8_t>((flags & ~EdgeFlags::OneWay) | EdgeFlags::Reversed);
                 raw_edges.push_back(rev);
             }
@@ -479,6 +507,7 @@ Graph OsmLoader::build_graph(
     // Fill col_idx and edges
     std::vector<EdgeId>   col_idx(E);
     std::vector<EdgeData> edges(E);
+    std::vector<float>    edge_lanes(E);
     std::vector<uint32_t> fill_pos = row_ptr; // current fill pointer per row
 
     // Geometry sidecar
@@ -522,6 +551,7 @@ Graph OsmLoader::build_graph(
             capacity = effective_capacity(capacity, it->second.type, phase);
         }
         ed.capacity = capacity;
+        edge_lanes[eid] = re.lanes;
 
         // Geometry: no intermediate points at segment level (polyline points
         // are represented by consecutive edges), so geom_ptr[eid] = eid offset.
@@ -532,6 +562,7 @@ Graph OsmLoader::build_graph(
     g.row_ptr  = std::move(row_ptr);
     g.col_idx  = std::move(col_idx);
     g.edges    = std::move(edges);
+    g.edge_lanes = std::move(edge_lanes);
     g.nodes    = std::move(nodes);
     g.geom_ptr = std::move(geom_ptr);
     g.signal_schedules = std::move(signal_schedules);

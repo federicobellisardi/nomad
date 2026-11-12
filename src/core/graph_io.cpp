@@ -9,7 +9,8 @@ namespace nomad {
 // Binary format: "NOMG" magic + uint32 version + packed vectors.
 // All integers are little-endian (host byte order — nomad is single-machine).
 static constexpr char     kMagic[4] = {'N','O','M','G'};
-static constexpr uint32_t kVersion  = 1;
+// v1: up to signal_schedules. v2: + edge_lanes (float per edge, may be empty).
+static constexpr uint32_t kVersion  = 2;
 
 namespace {
 
@@ -74,6 +75,7 @@ void Graph::save(const std::filesystem::path& path) const {
     write_vec(out, way_ids);
     write_strings(out, way_names);
     write_vec(out, signal_schedules);
+    write_vec(out, edge_lanes);
 
     if (!out)
         throw std::runtime_error("Write error on graph cache: " + path.string());
@@ -91,7 +93,7 @@ Graph Graph::load(const std::filesystem::path& path) {
 
     uint32_t ver = 0;
     in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
-    if (ver != kVersion)
+    if (ver != 1 && ver != kVersion)
         throw std::runtime_error("Graph cache version mismatch (expected " +
                                   std::to_string(kVersion) + ", got " +
                                   std::to_string(ver) + "): " + path.string());
@@ -111,11 +113,14 @@ Graph Graph::load(const std::filesystem::path& path) {
     read_vec(in, g.way_ids);
     read_strings(in, g.way_names);
     read_vec(in, g.signal_schedules);
+    if (ver >= 2) read_vec(in, g.edge_lanes);
 
     if (!in)
         throw std::runtime_error("Read error on graph cache: " + path.string());
     if (g.num_nodes() != N || g.num_edges() != E)
         throw std::runtime_error("Graph cache corrupted: node/edge count mismatch");
+    if (!g.edge_lanes.empty() && g.edge_lanes.size() != E)
+        throw std::runtime_error("Graph cache corrupted: edge_lanes size mismatch");
 
     return g;
 }

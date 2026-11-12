@@ -52,6 +52,7 @@ struct RawEdge {
     float     length_m;
     float     speed_ms;
     float     capacity;
+    float     lanes = 1.0f; // lanes in this edge's direction
     uint8_t   road_class;
     uint8_t   flags;        // EdgeFlags bitmask
     uint16_t  way_meta_idx;

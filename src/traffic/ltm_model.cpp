@@ -6,6 +6,13 @@
 
 namespace nomad {
 
+namespace {
+float lanes_of(const Graph& g, EdgeId e) {
+    if (g.has_lanes()) return std::max(1.0f, g.edge_lanes[e]);
+    return std::max(1.0f, g.edges[e].capacity / 1600.0f);
+}
+} // namespace
+
 LtmTrafficModel::LtmTrafficModel(const Graph& graph)
     : LtmTrafficModel(graph, Config{}) {}
 
@@ -20,7 +27,10 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
 
     for (uint32_t e = 0; e < E; ++e) {
         const EdgeData& ed = graph.edges[e];
-        float estimated_lanes = std::max(1.0f, ed.capacity / 1600.0f);
+        // Lanes: from the graph (v2, OSM per direction) when available;
+        // otherwise the legacy estimate capacity / 1600, which mixes in the
+        // per-class lane capacity and the intersection derating.
+        float estimated_lanes = lanes_of(graph, e);
         // Same 50m effective-length floor as QueueTrafficModel: micro-segments
         // (median ~16m) would otherwise have a storage capacity of 2-3
         // vehicles, triggering spillback from a single agent.
@@ -41,7 +51,7 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
         mv_off_.resize(E + 1);
         uint32_t off = 0;
         for (uint32_t e = 0; e < E; ++e) {
-            lanes_[e]  = std::max(1.0f, graph.edges[e].capacity / 1600.0f);
+            lanes_[e]  = lanes_of(graph, e);
             mv_off_[e] = off;
             NodeId u = graph.edges[e].target;
             if (u < graph.num_nodes()) off += graph.row_ptr[u + 1] - graph.row_ptr[u];

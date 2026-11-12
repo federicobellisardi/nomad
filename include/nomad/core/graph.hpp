@@ -82,6 +82,15 @@ struct Graph {
     std::vector<std::string>  way_names;      // indexed by EdgeData::way_meta_idx
     std::vector<SignalSchedule> signal_schedules; // indexed by NodeData::signal_phase_idx
 
+    // ── Per-direction lane count (graph format v2) ───────────────────────────
+    // edge_lanes[e]: lanes available to edge e's direction, from OSM lanes /
+    // lanes:forward / lanes:backward (class default when untagged); may be
+    // fractional (odd two-way totals, length-weighted after chain merging).
+    // Empty for v1 graphs and hand-built graphs: consumers then fall back to
+    // the legacy capacity-based estimate.
+    std::vector<float> edge_lanes;
+    bool has_lanes() const noexcept { return edge_lanes.size() == edges.size() && !edges.empty(); }
+
     // ── Accessors ─────────────────────────────────────────────────────────────
     uint32_t num_nodes() const noexcept {
         return static_cast<uint32_t>(nodes.size());

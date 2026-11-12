@@ -12,6 +12,7 @@ add_executable(nomad_tests
     unit/test_stuck_time.cpp
     unit/test_td_costs.cpp
     unit/test_implied_oneway.cpp
+    unit/test_osm_lanes.cpp
     integration/test_simulation_synthetic.cpp
 )
 

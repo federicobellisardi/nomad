@@ -319,6 +319,14 @@ void NetworkCleaner::simplify_degree2_nodes(Graph& g) {
 
             // Merge: X→u→Y becomes X→Y
             g.edges[in_e].target         = Y;
+            if (g.has_lanes()) {
+                // Length-weighted lanes: storage (length x lanes) of the merged
+                // edge equals the sum over the absorbed segments. Capacity
+                // below keeps the bottleneck (min).
+                const float la = g.edges[in_e].length_m, lb = g.edges[out_e].length_m;
+                if (la + lb > 0.0f)
+                    g.edge_lanes[in_e] = (la * g.edge_lanes[in_e] + lb * g.edge_lanes[out_e]) / (la + lb);
+            }
             g.edges[in_e].length_m      += g.edges[out_e].length_m;
             g.edges[in_e].free_flow_speed = std::min(g.edges[in_e].free_flow_speed,
                                                       g.edges[out_e].free_flow_speed);
@@ -381,6 +389,8 @@ void NetworkCleaner::reindex(Graph& g) {
 
     // Build new edge list
     std::vector<EdgeData> new_edges;
+    const bool lanes = g.has_lanes();
+    std::vector<float>    new_lanes;
     std::vector<EdgeId>   new_col;
     new_edges.reserve(E_old);
     new_col.reserve(E_old);
@@ -402,6 +412,7 @@ void NetworkCleaner::reindex(Graph& g) {
 
     uint32_t new_E = new_row_ptr[new_N];
     new_edges.resize(new_E);
+    if (lanes) new_lanes.resize(new_E);
     new_col.resize(new_E);
 
     // Second pass: fill
@@ -419,6 +430,7 @@ void NetworkCleaner::reindex(Graph& g) {
             ed.target           = nv;
             uint32_t pos        = fill[nu]++;
             new_edges[pos]      = ed;
+            if (lanes) new_lanes[pos] = g.edge_lanes[eid];
             new_col[pos]        = new_eid++;
         }
     }
@@ -433,6 +445,7 @@ void NetworkCleaner::reindex(Graph& g) {
     g.row_ptr = std::move(new_row_ptr);
     g.col_idx = std::move(new_col);
     g.edges   = std::move(new_edges);
+    g.edge_lanes = std::move(new_lanes);
     g.nodes   = std::move(new_nodes);
     // Geometry sidecar rebuild omitted (kept as-is in this phase)
     g.geom_ptr.assign(new_E + 1, 0);
