@@ -228,6 +228,16 @@ struct NomadWayHandler : osmium::handler::Handler {
                                      std::string(oneway) == "1"  ||
                                      std::string(oneway) == "true");
         bool reversed  = oneway && std::string(oneway) == "-1";
+        // Implied one-way (OSM wiki "Key:oneway"): junction=roundabout,
+        // junction=circular and highway=motorway are one-way unless tagged
+        // oneway=no. Without this every roundabout became a two-way ring.
+        if (!oneway) {
+            const char* jn = way.tags()["junction"];
+            const bool implied =
+                (jn && (std::strcmp(jn, "roundabout") == 0 || std::strcmp(jn, "circular") == 0)) ||
+                std::strcmp(highway, "motorway") == 0;
+            if (implied) is_oneway = true;
+        }
         // Links that carry no cars (footway, path, pedestrian street, ...) are
         // always two-way.
         if (!car_class) { is_oneway = false; reversed = false; }
