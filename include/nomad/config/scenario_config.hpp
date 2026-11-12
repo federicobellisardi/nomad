@@ -59,6 +59,7 @@ struct TrafficConfig {
     float ltm_discharge_burst_s = 10.0f;
     bool  ltm_movement_storage  = false;  // see LtmTrafficModel::Config::movement_storage
     float ltm_stuck_time_s      = 0.0f;   // see LtmTrafficModel::Config::stuck_time_s (0 = off)
+    bool  ltm_squeeze_per_receiver = false; // see LtmTrafficModel::Config::squeeze_per_receiver
 };
 
 struct DemandConfig {

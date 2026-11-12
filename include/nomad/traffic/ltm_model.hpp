@@ -87,6 +87,14 @@ public:
         // restarts after every exit, so a blocked link releases at most one
         // vehicle per stuck_time_s. The discharge-rate gate is never bypassed.
         float stuck_time_s        = 0.0f;
+
+        // Per-receiver squeeze limit (opt-in, needs stuck_time_s > 0). A link
+        // accepts at most one squeezed vehicle per stuck_time_s, whichever
+        // upstream link sends it. Without it, k blocked upstream links each
+        // squeeze one vehicle per stuck_time_s into the same receiver, which
+        // itself drains at one per stuck_time_s when blocked: micro-links
+        // piled up hundreds of vehicles over storage (Palma: ~18k excess veh).
+        bool  squeeze_per_receiver = false;
     };
 
     explicit LtmTrafficModel(const Graph& graph);
@@ -131,6 +139,8 @@ private:
         // it cannot double as "not currently blocked".
         double   gate_block_since{-1.0};    // sim time the block started; -1 = not blocked
         float    gate_wait_s{0.0f};         // duration of the current continuous block
+        // Sim time of the last squeezed entry INTO this link (squeeze_per_receiver).
+        double   last_squeeze_in{-1e18};
     };
 
     float travel_time_for(EdgeId e) const;

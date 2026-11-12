@@ -64,3 +64,68 @@ TEST_CASE("Stuck time: unblocked exits are not counted as squeezed", "[traffic][
     REQUIRE(m.on_exit(0, 1, 0, 100.0));
     REQUIRE(m.squeezed_exits() == 0);
 }
+
+// Two upstream links e0 (0->2) and e1 (1->2) feed the same receiver e2 (2->3).
+static Graph make_merge() {
+    Graph g;
+    g.nodes.resize(4);
+    for (int i = 0; i < 4; ++i) g.nodes[i] = {static_cast<float>(i) * 0.01f, 0.0f, 0, 0, 0, static_cast<uint32_t>(i)};
+    g.row_ptr = {0, 1, 2, 3, 3};
+    g.col_idx = {0, 1, 2};
+    auto mk = [](NodeId t) {
+        EdgeData d{};
+        d.target = t; d.length_m = 50.0f; d.free_flow_speed = 10.0f; d.capacity = 1600.0f;
+        d.road_class = static_cast<uint8_t>(RoadClass::Primary);
+        return d;
+    };
+    g.edges = {mk(2), mk(2), mk(3)};
+    g.geom_ptr.assign(4, 0);
+    return g;
+}
+
+static void fill_e2(LtmTrafficModel& m) {
+    for (AgentId a = 100; a < 107; ++a) m.on_enter(2, a, 0.0);
+    REQUIRE_FALSE(m.has_capacity(2));
+}
+
+TEST_CASE("Stuck time: without the per-receiver limit, every upstream link squeezes", "[traffic][stuck]") {
+    Graph g = make_merge();
+    LtmTrafficModel::Config c; c.stuck_time_s = 30.0f;
+    LtmTrafficModel m(g, c);
+    m.on_enter(0, 0, 0.0);
+    m.on_enter(1, 1, 0.0);
+    fill_e2(m);
+    REQUIRE_FALSE(m.on_exit(0, 2, 0, 0.0));
+    REQUIRE_FALSE(m.on_exit(1, 2, 1, 0.0));
+    REQUIRE(m.on_exit(0, 2, 0, 30.0));
+    REQUIRE(m.on_exit(1, 2, 1, 30.0));
+    REQUIRE(m.squeezed_exits() == 2);
+}
+
+TEST_CASE("Stuck time: per-receiver limit allows one squeeze into a link per stuck_time_s", "[traffic][stuck]") {
+    Graph g = make_merge();
+    LtmTrafficModel::Config c; c.stuck_time_s = 30.0f; c.squeeze_per_receiver = true;
+    LtmTrafficModel m(g, c);
+    m.on_enter(0, 0, 0.0);
+    m.on_enter(1, 1, 0.0);
+    fill_e2(m);
+    REQUIRE_FALSE(m.on_exit(0, 2, 0, 0.0));
+    REQUIRE_FALSE(m.on_exit(1, 2, 1, 0.0));
+    REQUIRE(m.on_exit(0, 2, 0, 30.0));          // first squeeze into e2
+    m.on_enter(2, 0, 30.0);
+    REQUIRE_FALSE(m.on_exit(1, 2, 1, 30.0));    // e2 already received one at t=30
+    REQUIRE_FALSE(m.on_exit(1, 2, 1, 59.0));
+    REQUIRE(m.on_exit(1, 2, 1, 60.0));          // e1 has waited >= 30 s and e2 is open again
+    REQUIRE(m.squeezed_exits() == 2);
+}
+
+TEST_CASE("Stuck time: per-receiver limit does not affect unblocked exits", "[traffic][stuck]") {
+    Graph g = make_merge();
+    LtmTrafficModel::Config c; c.stuck_time_s = 30.0f; c.squeeze_per_receiver = true;
+    LtmTrafficModel m(g, c);
+    m.on_enter(0, 0, 0.0);
+    m.on_enter(1, 1, 0.0);
+    REQUIRE(m.on_exit(0, 2, 0, 1.0));
+    REQUIRE(m.on_exit(1, 2, 1, 1.0));
+    REQUIRE(m.squeezed_exits() == 0);
+}
