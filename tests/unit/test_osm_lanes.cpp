@@ -186,3 +186,30 @@ TEST_CASE("LTM: storage uses graph lanes when present, capacity/1600 otherwise",
     REQUIRE(n1 == 41);
     REQUIRE(n0 == 51);
 }
+
+TEST_CASE("OsmLoader: capacity_from_total_lanes keeps legacy capacity, per-direction lanes", "[osm][lanes]") {
+    auto path = write_pbf("nomad_test_osm_lanes_legacy.osm.pbf");
+    OsmTagConfig cfg = OsmTagConfig::defaults();
+    cfg.capacity_from_total_lanes = true;
+    OsmLoader loader(cfg);
+    Graph g = loader.load(path);
+    WayLanes w[10];
+    for (uint32_t u = 0; u < g.num_nodes(); ++u) {
+        int k = static_cast<int>(std::lround((g.nodes[u].lon - 2.60) / 0.01 - 0.3));
+        for (EdgeId e : g.out_edges(u)) {
+            const auto& ed = g.edges[e];
+            if (!edge_accessible(ed.road_class, ed.flags, AgentMode::Car)) continue;
+            Dir& d = (g.nodes[ed.target].lon > g.nodes[u].lon) ? w[k].fwd : w[k].bwd;
+            d.lanes = g.edge_lanes[e];
+            d.cap   = ed.capacity;
+        }
+    }
+    REQUIRE_THAT(w[2].fwd.cap,   WithinAbs(4 * 1600.0f, 1e-3f));  // legacy: total on each direction
+    REQUIRE_THAT(w[2].bwd.cap,   WithinAbs(4 * 1600.0f, 1e-3f));
+    REQUIRE_THAT(w[2].fwd.lanes, WithinAbs(2.0f, 1e-6f));         // storage lanes still split
+    REQUIRE_THAT(w[3].fwd.cap,   WithinAbs(3 * 800.0f, 1e-3f));
+    REQUIRE_THAT(w[3].fwd.lanes, WithinAbs(1.5f, 1e-6f));
+    REQUIRE_THAT(w[6].fwd.cap,   WithinAbs(2 * 1600.0f, 1e-3f));  // untagged: default
+    REQUIRE_THAT(w[1].fwd.cap,   WithinAbs(3 * 1600.0f, 1e-3f));  // one-way unchanged
+    std::filesystem::remove(path);
+}

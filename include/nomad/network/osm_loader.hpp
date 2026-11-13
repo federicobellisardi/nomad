@@ -37,6 +37,12 @@ struct OsmTagConfig {
     // Tags that unconditionally exclude a way from the car network
     std::vector<std::string> car_exclude_tags;
 
+    // Legacy capacity (pre-3112cd0): every direction gets `lanes` (total over
+    // both directions, or the class default) x per-lane capacity. Lanes per
+    // direction (Graph::edge_lanes, used for LTM storage) are unaffected.
+    // Lets storage and capacity effects be tested separately.
+    bool capacity_from_total_lanes = false;
+
     // Default signal timing used when OSM lacks explicit timing data
     SignalDefaults signal_defaults;
 

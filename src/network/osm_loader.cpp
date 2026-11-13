@@ -75,6 +75,8 @@ OsmTagConfig OsmTagConfig::load_yaml(const std::filesystem::path& yaml_path) {
             cfg.signal_defaults.cycle_s = root["signal_cycle_s"].as<float>();
         if (root["signal_green_frac"])
             cfg.signal_defaults.green_frac = root["signal_green_frac"].as<float>();
+        if (root["capacity_from_total_lanes"])
+            cfg.capacity_from_total_lanes = root["capacity_from_total_lanes"].as<bool>();
         // Additional tag overrides loaded here as the config file grows
     } catch (const std::exception& ex) {
         spdlog::warn("OsmTagConfig::load_yaml: {} — using defaults", ex.what());
@@ -263,8 +265,12 @@ struct NomadWayHandler : osmium::handler::Handler {
             lanes_fwd = std::max(1.0f, lanes_fwd);
             lanes_bwd = std::max(1.0f, lanes_bwd);
         }
-        const float cap_fwd = lanes_fwd * defaults.capacity_per_lane_veh_h;
-        const float cap_bwd = lanes_bwd * defaults.capacity_per_lane_veh_h;
+        float cap_fwd = lanes_fwd * defaults.capacity_per_lane_veh_h;
+        float cap_bwd = lanes_bwd * defaults.capacity_per_lane_veh_h;
+        if (cfg.capacity_from_total_lanes) {
+            const float legacy = (total > 0 ? total : dflt) * defaults.capacity_per_lane_veh_h;
+            cap_fwd = cap_bwd = legacy;
+        }
 
         // Flags
         uint8_t flags = 0;
