@@ -24,7 +24,10 @@ static Graph make_diverge(float e0_len = 50.0f) {
     Graph g;
     g.nodes.resize(5);
     for (int i = 0; i < 5; ++i) g.nodes[i] = {static_cast<float>(i) * 0.01f, 0.0f, 0, 0, 0, static_cast<uint32_t>(i)};
-    g.row_ptr = {0, 1, 3, 4, 4, 4};
+    // node 1 leaves on e1 (through) and e2 (ramp); e3 leaves node 3 (after
+    // the ramp). The earlier CSR put e3 after the through link (node 2), so
+    // ramp-bound cars also used e1 and the ramp led nowhere.
+    g.row_ptr = {0, 1, 3, 3, 4, 4};
     g.col_idx = {0, 2, 1, 3};
     auto mk = [](NodeId t, float len, float cap) {
         EdgeData d{};
@@ -109,8 +112,9 @@ TEST_CASE("Movement storage: equal-width movement is not restricted", "[traffic]
 }
 
 // End to end: 150 agents to the exit (bottleneck after the ramp) then 30
-// through agents. Without movement storage the exit queue fills the approach
-// and blocks the through agents; with it they pass at near free flow.
+// through agents. Without movement storage the exit queue fills the whole
+// approach, so through agents cannot even enter it; with it they pass at near
+// free flow. Measured from the first departure attempt to entering e1.
 static double max_through_dwell_on_approach(bool movement_storage) {
     namespace fs = std::filesystem;
     auto graph = std::make_shared<Graph>(make_diverge(200.0f));
@@ -140,25 +144,27 @@ static double max_through_dwell_on_approach(bool movement_storage) {
     }
     sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
 
-    std::unordered_map<AgentId, double> t_e0, t_e1;
+    std::unordered_map<AgentId, double> t_dep, t_e1;
+    sim.register_hook(EventType::AgentDepart, [&](const Event& e) {
+        if (e.agent >= 150) t_dep.emplace(e.agent, e.time);   // first attempt only
+    });
     sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
         if (e.agent < 150) return;
-        if (e.payload == 0) t_e0[e.agent] = e.time;
         if (e.payload == 1) t_e1[e.agent] = e.time;
     });
     sim.run();
     fs::remove(od);
 
     REQUIRE(t_e1.size() == 30);   // every through agent got through
-    double worst = 0.0;   // longest time a through agent spent on the approach e0
-    for (auto& [a, t1] : t_e1) worst = std::max(worst, t1 - t_e0.at(a));
+    double worst = 0.0;   // longest time from departure to the through link
+    for (auto& [a, t1] : t_e1) worst = std::max(worst, t1 - t_dep.at(a));
     return worst;
 }
 
 TEST_CASE("Movement storage: through traffic is not blocked by an exit queue", "[traffic][movement][integration]") {
     double blocked = max_through_dwell_on_approach(false);
     double free    = max_through_dwell_on_approach(true);
-    INFO("worst through dwell on e0: without=" << blocked << " s, with=" << free << " s");
+    INFO("worst through departure-to-e1 time: without=" << blocked << " s, with=" << free << " s");
     REQUIRE(free < 20.0);        // free flow on e0 is 10 s
     REQUIRE(blocked > 300.0);    // documents the diverge blocking it removes
 }
