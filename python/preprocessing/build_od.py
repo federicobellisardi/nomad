@@ -88,8 +88,18 @@ def load_mitma_zones(zones_path: Path, fua_poly) -> gpd.GeoDataFrame:
         [c for c in zones.columns if c.lower() != "geometry"][0],
     )
     zones = zones.rename(columns={id_col: "id"})
+    # A zone belongs to the FUA when its centroid is inside it (original rule)
+    # OR at least half of its area is inside it. The second condition recovers
+    # multipolygon zones whose centroid falls between their parts, e.g. Palma
+    # district 0704001 (centre + Cabrera, centroid at sea), which the centroid
+    # rule alone dropped. No zone selected by the original rule is removed.
     centroids_proj = zones.to_crs(zones_crs).centroid.to_crs("EPSG:4326")
-    return zones[centroids_proj.within(fua_poly)].copy()
+    in_centroid = centroids_proj.within(fua_poly)
+    # Areas in an equal-area CRS (LAEA Europe); make_valid for broken rings.
+    z_ea   = zones.to_crs("EPSG:3035").geometry.make_valid()
+    fua_ea = gpd.GeoSeries([fua_poly], crs="EPSG:4326").to_crs("EPSG:3035").make_valid().iloc[0]
+    share  = z_ea.intersection(fua_ea).area / z_ea.area
+    return zones[in_centroid | (share >= 0.5)].copy()
 
 
 def detect_columns(sample_path: Path) -> dict:
