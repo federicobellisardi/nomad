@@ -272,7 +272,7 @@ void Simulation::handle_depart(const Event& e) {
         // dispatches a genuine AgentEnterLink event (handle_event's switch,
         // which normally does both, is bypassed for this transition).
         if (traffic_ && hot_.mode[a] == AgentMode::Car &&
-            !traffic_->has_capacity_for(pre_edges[0],
+            !traffic_->has_capacity_departure(pre_edges[0],
                                         pre_edges.size() > 1 ? pre_edges[1] : kInvalidEdge)) {
             ++n_depart_rejected_;
             eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
@@ -302,7 +302,7 @@ void Simulation::handle_depart(const Event& e) {
     }
 
     if (traffic_ && hot_.mode[a] == AgentMode::Car &&
-        !traffic_->has_capacity_for(route.edges[0],
+        !traffic_->has_capacity_departure(route.edges[0],
                                     route.edges.size() > 1 ? route.edges[1] : kInvalidEdge)) {
         ++n_depart_rejected_;
         eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});

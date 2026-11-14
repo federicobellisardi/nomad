@@ -140,6 +140,11 @@ public:
     virtual bool has_capacity_for(EdgeId e, EdgeId next) const {
         (void)next; return has_capacity(e);
     }
+    // Admission of a departing vehicle onto its first edge e (next = second
+    // edge). Models with node priority treat departures as minor entries.
+    virtual bool has_capacity_departure(EdgeId e, EdgeId next) const {
+        return has_capacity_for(e, next);
+    }
     // Exit from e into `next`, where `next_after` is the edge the agent will
     // take after `next` (used for the spillback check on `next`).
     virtual bool on_exit_to(EdgeId e, EdgeId next, EdgeId next_after, AgentId a, SimTime t) {

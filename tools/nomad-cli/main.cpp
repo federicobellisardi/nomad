@@ -101,6 +101,7 @@ static int run_scenario(ScenarioConfig cfg) {
         ltm_cfg.movement_storage     = cfg.traffic.ltm_movement_storage;
         ltm_cfg.stuck_time_s         = cfg.traffic.ltm_stuck_time_s;
         ltm_cfg.squeeze_per_receiver = cfg.traffic.ltm_squeeze_per_receiver;
+        ltm_cfg.priority_reserve_veh = cfg.traffic.ltm_priority_reserve_veh;
         auto ltm = std::make_unique<LtmTrafficModel>(*graph, ltm_cfg);
         ltm_model = ltm.get();
         sim.set_traffic_model(std::move(ltm));

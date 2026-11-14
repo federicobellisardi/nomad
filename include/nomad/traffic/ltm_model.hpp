@@ -95,6 +95,16 @@ public:
         // itself drains at one per stuck_time_s when blocked: micro-links
         // piled up hundreds of vehicles over storage (Palma: ~18k excess veh).
         bool  squeeze_per_receiver = false;
+
+        // Node priority (opt-in, 0 = off). Each link has one major approach:
+        // on a roundabout link the circulating roundabout approach, otherwise
+        // the best road class, ties broken by the straightest continuation.
+        // Vehicles from any other approach, and departures onto the link,
+        // enter only while the link keeps more than priority_reserve_veh free
+        // storage. Without it side entries took every freed slot and a ring
+        // of links (dual carriageway + U-turns, Palma) reached jam density and
+        // deadlocked. The stuck-time squeeze still overrides the block.
+        float priority_reserve_veh = 0.0f;
     };
 
     explicit LtmTrafficModel(const Graph& graph);
@@ -108,6 +118,10 @@ public:
     std::span<const LinkState> link_states()  const                   override;
     std::string_view model_name()            const  override { return "ltm"; }
     bool    has_capacity(EdgeId e) const                              override;
+    bool    has_capacity_departure(EdgeId e, EdgeId next) const       override;
+    // True if `e` is the major approach of `next` (always true when the
+    // priority rule is off).
+    bool    is_major(EdgeId e, EdgeId next) const;
     bool    has_capacity_for(EdgeId e, EdgeId next) const               override;
     bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
                          AgentId a, SimTime t)                            override;
@@ -160,6 +174,7 @@ private:
     uint32_t movement_slot(EdgeId e, EdgeId next) const;
     float    movement_cap (EdgeId e, EdgeId next) const;
     void     release_movement(AgentId a);
+    std::vector<EdgeId>   major_in_;   // major approach of each link (priority rule)
     std::vector<float>    lanes_;
     std::vector<uint32_t> mv_off_;
     std::vector<int32_t>  mv_occ_;

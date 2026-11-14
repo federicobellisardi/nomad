@@ -1,0 +1,113 @@
+// LTM node priority (LtmTrafficModel::Config::priority_reserve_veh).
+// Each link has one major approach (roundabout circulating link if the link
+// is on a roundabout, otherwise the best road class, ties broken by the
+// straightest continuation). Vehicles from any other approach, and departures,
+// enter only while the receiving link keeps more than priority_reserve_veh
+// free storage. Without it side entries took every freed slot and a ring of
+// links (dual carriageway + U-turns) reached jam density and deadlocked.
+#include <catch2/catch_test_macros.hpp>
+
+#include <nomad/core/graph.hpp>
+#include <nomad/traffic/ltm_model.hpp>
+
+using namespace nomad;
+
+namespace {
+//   main 0 --e0 (primary)----> 1 --e2 (primary, 50 m)--> 3 --e3--> 4
+//   side 2 --e1 (residential)-^
+// node coords: 0 (0,0), 1 (0.01,0), 3 (0.02,0), 4 (0.03,0), 2 (0.01,-0.01)
+Graph make_merge(bool roundabout_side = false) {
+    Graph g;
+    g.nodes.resize(5);
+    const float xy[5][2] = {{0.0f, 0.0f}, {0.01f, 0.0f}, {0.01f, -0.01f}, {0.02f, 0.0f}, {0.03f, 0.0f}};
+    for (int i = 0; i < 5; ++i) g.nodes[i] = {xy[i][0], xy[i][1], 0, 0, 0, static_cast<uint32_t>(i)};
+    // out-edges: node0: e0; node1: e2; node2: e1; node3: e3
+    g.row_ptr = {0, 1, 2, 3, 4, 4};
+    g.col_idx = {0, 2, 1, 3};
+    auto mk = [](NodeId t, float len, RoadClass rc, uint8_t fl = 0) {
+        EdgeData d{};
+        d.target = t; d.length_m = len; d.free_flow_speed = 10.0f; d.capacity = 1600.0f;
+        d.road_class = static_cast<uint8_t>(rc); d.flags = fl;
+        return d;
+    };
+    g.edges = {mk(1, 200.0f, RoadClass::Primary),
+               mk(1, 200.0f, RoadClass::Residential, roundabout_side ? EdgeFlags::Roundabout : 0),
+               mk(3, 50.0f, RoadClass::Primary, roundabout_side ? EdgeFlags::Roundabout : 0),
+               mk(4, 200.0f, RoadClass::Primary)};
+    g.geom_ptr.assign(5, 0);
+    return g;
+}
+
+LtmTrafficModel make(const Graph& g, float reserve, float stuck = 0.0f) {
+    LtmTrafficModel::Config c;
+    c.priority_reserve_veh = reserve;
+    c.stuck_time_s = stuck;
+    return LtmTrafficModel(g, c);
+}
+
+// e2 storage = 50 m x 1 lane / 7.5 = 6.67 veh. With 5 on it, free = 1.67.
+void fill_receiver(LtmTrafficModel& m, int n) {
+    for (int i = 0; i < n; ++i) m.on_enter(2, 100 + i, 0.0);
+}
+} // namespace
+
+TEST_CASE("Priority: major approach is the better road class", "[traffic][priority]") {
+    Graph g = make_merge();
+    auto m = make(g, 2.0f);
+    REQUIRE(m.is_major(0, 2));
+    REQUIRE_FALSE(m.is_major(1, 2));
+}
+
+TEST_CASE("Priority: minor entry yields when reserve is reached, major does not", "[traffic][priority]") {
+    Graph g = make_merge();
+    auto m = make(g, 2.0f);
+    m.on_enter(0, 1, 0.0);
+    m.on_enter(1, 2, 0.0);
+    fill_receiver(m, 5);                          // free 1.67 <= 2
+    REQUIRE_FALSE(m.on_exit_to(1, 2, 3, 2, 10.0)); // side waits
+    REQUIRE(m.on_exit_to(0, 2, 3, 1, 10.0));       // main enters
+}
+
+TEST_CASE("Priority: minor entry admitted while reserve is free", "[traffic][priority]") {
+    Graph g = make_merge();
+    auto m = make(g, 2.0f);
+    m.on_enter(1, 2, 0.0);
+    fill_receiver(m, 4);                          // free 2.67 > 2
+    REQUIRE(m.on_exit_to(1, 2, 3, 2, 10.0));
+}
+
+TEST_CASE("Priority: off by default", "[traffic][priority]") {
+    Graph g = make_merge();
+    auto m = make(g, 0.0f);
+    m.on_enter(1, 2, 0.0);
+    fill_receiver(m, 5);
+    REQUIRE(m.on_exit_to(1, 2, 3, 2, 10.0));
+    REQUIRE(m.has_capacity_departure(2, 3));
+}
+
+TEST_CASE("Priority: departures yield like minor entries", "[traffic][priority]") {
+    Graph g = make_merge();
+    auto m = make(g, 2.0f);
+    fill_receiver(m, 4);
+    REQUIRE(m.has_capacity_departure(2, 3));
+    m.on_enter(2, 200, 0.0);                      // 5 on it
+    REQUIRE_FALSE(m.has_capacity_departure(2, 3));
+    REQUIRE(m.has_capacity_for(2, 3));            // plain storage check unchanged
+}
+
+TEST_CASE("Priority: roundabout circulating link is major over a better class", "[traffic][priority]") {
+    Graph g = make_merge(true);
+    auto m = make(g, 2.0f);
+    REQUIRE(m.is_major(1, 2));
+    REQUIRE_FALSE(m.is_major(0, 2));
+}
+
+TEST_CASE("Priority: stuck-time squeeze still overrides a minor block", "[traffic][priority]") {
+    Graph g = make_merge();
+    auto m = make(g, 2.0f, 30.0f);
+    m.on_enter(1, 2, 0.0);
+    fill_receiver(m, 5);
+    REQUIRE_FALSE(m.on_exit_to(1, 2, 3, 2, 10.0)); // block starts at t=10
+    REQUIRE_FALSE(m.on_exit_to(1, 2, 3, 2, 30.0));
+    REQUIRE(m.on_exit_to(1, 2, 3, 2, 41.0));       // >= 30 s blocked
+}
