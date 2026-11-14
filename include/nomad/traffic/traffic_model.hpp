@@ -156,6 +156,10 @@ public:
     virtual void assign_movement(EdgeId e, AgentId a, EdgeId next) {
         (void)e; (void)a; (void)next;
     }
+    // QNode node model: true if a link's exit buffer is FIFO per movement
+    // (next link) rather than per link, i.e. a blocked movement does not
+    // block vehicles heading elsewhere (multi-lane approach).
+    virtual bool fifo_per_movement() const { return false; }
 
     virtual std::string_view model_name() const = 0;
 

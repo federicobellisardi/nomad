@@ -73,6 +73,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.simulation.seed                  = s.value("seed",                  cfg.simulation.seed);
         cfg.simulation.store_traces  = s.value("store_traces", cfg.simulation.store_traces);
         cfg.simulation.traffic_model = s.value("traffic_model",cfg.simulation.traffic_model);
+        cfg.simulation.node_model    = s.value("node_model",   cfg.simulation.node_model);
         cfg.simulation.router        = s.value("router",       cfg.simulation.router);
         cfg.simulation.snapshot_interval_s =
             s.value("snapshot_interval_s", cfg.simulation.snapshot_interval_s);
@@ -237,6 +238,7 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["simulation"]["seed"]               = cfg.simulation.seed;
     j["simulation"]["store_traces"]       = cfg.simulation.store_traces;
     j["simulation"]["traffic_model"]      = cfg.simulation.traffic_model;
+    j["simulation"]["node_model"]         = cfg.simulation.node_model;
     j["simulation"]["router"]             = cfg.simulation.router;
     j["simulation"]["snapshot_interval_s"]= cfg.simulation.snapshot_interval_s;
 
@@ -294,6 +296,8 @@ std::string ScenarioConfigIO::validate(const ScenarioConfig& cfg) {
         return "simulation.end_time must be > start_time";
     if (cfg.demand.source == "od_csv" && !cfg.demand.od_csv)
         return "demand.od_csv is required when demand.source = od_csv";
+    if (cfg.simulation.node_model != "agent" && cfg.simulation.node_model != "qnode")
+        return "simulation.node_model must be \"agent\" or \"qnode\"";
     return {};
 }
 
@@ -302,7 +306,7 @@ void ScenarioConfigIO::log_summary(const ScenarioConfig& cfg) {
     spdlog::info("=== nomad scenario: {} ===", cfg.name);
     spdlog::info("  OSM:       {}", cfg.network.osm_pbf.string());
     spdlog::info("  Time:      {:.0f}s – {:.0f}s", cfg.simulation.start_time, cfg.simulation.end_time);
-    spdlog::info("  Traffic:   {}", cfg.simulation.traffic_model);
+    spdlog::info("  Traffic:   {} (node model {})", cfg.simulation.traffic_model, cfg.simulation.node_model);
     spdlog::info("  Router:    {}", cfg.simulation.router);
     spdlog::info("  Demand:    {}", cfg.demand.source);
     spdlog::info("  Threads:   {}", cfg.simulation.num_threads == 0 ? "auto" :

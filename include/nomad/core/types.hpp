@@ -109,6 +109,7 @@ enum class EventType : uint8_t {
     SignalPhaseChange   = 5,
     DemandInjection     = 6,
     SnapshotDump        = 7,
+    NodeStep            = 8,   // QNode node model: serve one node (payload = NodeId)
 };
 
 // ── Activity type ─────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -64,6 +65,12 @@ struct SimulationConfig {
     uint32_t num_threads         = 0;      // 0 = hardware_concurrency
     bool     store_traces        = false;
     std::string traffic_model    = "queue";
+    // Node model for cars. "agent": each car retries its own exit every
+    // second (first come, first served at a node). "qnode": MATSim-style
+    // QNode -- cars wait in a FIFO buffer at the end of their link and each
+    // node, once per second, serves its in-links in random order weighted by
+    // capacity (see handle_node_step()).
+    std::string node_model       = "agent";
     std::string router           = "CH";
     uint32_t snapshot_interval_s = 300;
 };
@@ -148,6 +155,14 @@ private:
     // (EventType::AgentEnterLink is no longer ever pushed as a real event).
     void enter_edge_now          (AgentId a, EdgeId eid, SimTime t);
     void handle_exit_link        (const Event& e);
+    // Second half of a car's link exit, once the traffic model has admitted
+    // it: records the exit, then arrives or enters `next`. Shared by
+    // handle_exit_link() and handle_node_step().
+    void complete_exit           (AgentId a, EdgeId eid, EdgeId next, SimTime t);
+    // QNode node model (cfg_.node_model == "qnode"): serve node n at time t.
+    void handle_node_step        (const Event& e);
+    void schedule_node_step      (NodeId n, SimTime t);
+    void init_qnode              ();
     void handle_arrive_activity  (const Event& e);
     void handle_reroute          (const Event& e);
     void handle_signal_change    (const Event& e);
@@ -220,6 +235,14 @@ private:
 
     SimTime last_reroute_t_{-1e9f};
     SimTime last_teleport_t_{-1e9f};
+
+    // QNode node model state (empty unless cfg_.node_model == "qnode").
+    bool                              qnode_{false};
+    std::vector<std::deque<AgentId>>  qbuf_;            // per edge: cars ready to leave, FIFO
+    std::vector<uint32_t>             qin_ptr_;         // per node: CSR of in-edges
+    std::vector<EdgeId>               qin_idx_;
+    std::vector<SimTime>              qnode_next_;      // per node: pending step time, -1 = none
+    std::vector<SimTime>              qlast_exit_;      // per edge: latest scheduled exit (no overtaking)
 
     // schedule_pretrip_reroutes() state -- built once (inject_demand()) when
     // cfg_.enable_pretrip_reroute is set: agent indices sorted by their own

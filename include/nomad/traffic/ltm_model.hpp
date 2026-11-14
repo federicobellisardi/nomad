@@ -126,6 +126,7 @@ public:
     bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
                          AgentId a, SimTime t)                            override;
     void    assign_movement(EdgeId e, AgentId a, EdgeId next)            override;
+    bool    fifo_per_movement() const override { return cfg_.movement_storage; }
 
     // Exits forced through a blocked spillback gate by the stuck_time_s rule.
     uint64_t squeezed_exits() const { return n_squeezed_; }

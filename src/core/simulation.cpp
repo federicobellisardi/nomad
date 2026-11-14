@@ -8,6 +8,7 @@
 #include <nomad/output/writer.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -235,6 +236,7 @@ void Simulation::handle_event(const Event& e) {
     case EventType::AgentArriveActivity: ++n_arrive_;  handle_arrive_activity(e);  break;
     case EventType::AgentReroute:        handle_reroute(e);          break;
     case EventType::SignalPhaseChange:   handle_signal_change(e);    break;
+    case EventType::NodeStep:            handle_node_step(e);        break;
     default: break;
     }
     fire_hooks(e.type, e);
@@ -334,6 +336,13 @@ void Simulation::enter_edge_now(AgentId a, EdgeId eid, SimTime t) {
     SimTime exit_time;
     if (traffic_ && hot_.mode[a] == AgentMode::Car) {
         exit_time = traffic_->on_enter(eid, a, t);
+        // QNode: no overtaking on a link. A car reaches the end of the link
+        // (and its FIFO buffer) after the car that entered before it; the
+        // 1 ms step keeps equal times from being reordered by the queue.
+        if (qnode_ && eid < qlast_exit_.size()) {
+            exit_time = std::max(exit_time, qlast_exit_[eid] + 1e-3);
+            qlast_exit_[eid] = exit_time;
+        }
         traffic_->record_enter(eid, t);
         traffic_->assign_movement(eid, a, next_edge_after_current(a));
     } else {
@@ -355,6 +364,14 @@ void Simulation::handle_exit_link(const Event& e) {
         return;
     }
 
+    // QNode node model: the car has reached the end of its link; it waits in
+    // the link's FIFO buffer and the downstream node releases it.
+    if (qnode_ && traffic_ && hot_.mode[a] == AgentMode::Car) {
+        qbuf_[eid].push_back(a);
+        schedule_node_step(graph_->edges[eid].target, e.time);
+        return;
+    }
+
     // Peek the next edge (without committing route_pos) so the traffic model
     // can check downstream spillback before releasing the agent.
     uint16_t pos  = hot_.route_pos[a] + 1;
@@ -370,6 +387,12 @@ void Simulation::handle_exit_link(const Event& e) {
         eq_.push({e.time + 1.0, a, eid, EventType::AgentExitLink, {}});
         return;
     }
+    complete_exit(a, eid, next, e.time);
+}
+
+void Simulation::complete_exit(AgentId a, EdgeId eid, EdgeId next, SimTime t) {
+    const Event e{t, a, eid, EventType::AgentExitLink, {}};
+    const uint16_t pos = hot_.route_pos[a] + 1;
     if (traffic_ && hot_.mode[a] == AgentMode::Car) traffic_->record_exit(eid, e.time);
     if (td_rec_ && hot_.mode[a] == AgentMode::Car)
         td_rec_->record(eid, hot_.enter_time[a], e.time);
@@ -398,6 +421,126 @@ void Simulation::handle_exit_link(const Event& e) {
     enter_edge_now(a, next, e.time);
     ++n_enter_;
     fire_hooks(EventType::AgentEnterLink, {e.time, a, next, EventType::AgentEnterLink, {}});
+}
+
+// ── QNode node model (cfg_.node_model == "qnode") ──────────────────────────────
+// After MATSim's QSim QNode. A car whose earliest exit time has passed waits in
+// the FIFO buffer of its link (handle_exit_link). Once per simulated second a
+// node with waiting cars is served: its in-links with a non-empty buffer are
+// visited in random order, drawn without replacement with probability
+// proportional to link capacity; each in-link releases cars in FIFO order
+// while the traffic model admits them (on_exit_to: downstream storage,
+// discharge cap, stuck-time squeeze). Earlier-served in-links take the
+// downstream space first, so over time a congested merge is shared in
+// proportion to approach capacity. With fifo_per_movement() a blocked
+// movement does not block cars heading to another next link.
+
+void Simulation::init_qnode() {
+    if (cfg_.node_model != "qnode" && cfg_.node_model != "agent")
+        throw std::runtime_error("unknown node_model: " + cfg_.node_model);
+    qnode_ = cfg_.node_model == "qnode";
+    if (!qnode_ || !graph_) return;
+    const uint32_t N = graph_->num_nodes(), E = graph_->num_edges();
+    qbuf_.assign(E, {});
+    qlast_exit_.assign(E, -1e18);
+    qnode_next_.assign(N, -1.0);
+    qin_ptr_.assign(N + 1, 0);
+    for (uint32_t e = 0; e < E; ++e)
+        if (graph_->edges[e].target < N) ++qin_ptr_[graph_->edges[e].target + 1];
+    for (uint32_t u = 0; u < N; ++u) qin_ptr_[u + 1] += qin_ptr_[u];
+    qin_idx_.assign(E, kInvalidEdge);
+    std::vector<uint32_t> fill(qin_ptr_.begin(), qin_ptr_.end() - 1);
+    for (uint32_t e = 0; e < E; ++e) {
+        NodeId t = graph_->edges[e].target;
+        if (t < N) qin_idx_[fill[t]++] = e;
+    }
+    spdlog::info("Node model: qnode (capacity-weighted in-link service, FIFO {})",
+                 traffic_ && traffic_->fifo_per_movement() ? "per movement" : "per link");
+}
+
+void Simulation::schedule_node_step(NodeId n, SimTime t) {
+    if (n >= qnode_next_.size() || qnode_next_[n] >= 0.0) return;   // already pending
+    const SimTime ts = std::floor(t) + 1.0;   // next whole second
+    qnode_next_[n] = ts;
+    eq_.push({ts, kNoAgent, n, EventType::NodeStep, {}});
+}
+
+namespace {
+inline uint64_t splitmix64(uint64_t& x) {
+    uint64_t z = (x += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+} // namespace
+
+void Simulation::handle_node_step(const Event& e) {
+    const NodeId n = e.payload;
+    const SimTime t = e.time;
+    if (n >= qnode_next_.size()) return;
+    qnode_next_[n] = -1.0;
+
+    // in-links with waiting cars, and their capacities
+    std::vector<std::pair<EdgeId, float>> act;
+    double total = 0.0;
+    for (uint32_t k = qin_ptr_[n]; k < qin_ptr_[n + 1]; ++k) {
+        EdgeId ein = qin_idx_[k];
+        if (qbuf_[ein].empty()) continue;
+        float c = std::max(1.0f, graph_->edges[ein].capacity);
+        act.emplace_back(ein, c);
+        total += c;
+    }
+    // reproducible stream per (seed, node, second)
+    uint64_t st = (static_cast<uint64_t>(cfg_.seed) << 32) ^ (static_cast<uint64_t>(n) * 0x9E3779B1ull)
+                  ^ (static_cast<uint64_t>(t) * 0xC2B2AE3D27D4EB4Full);
+    const bool per_mv = traffic_ && traffic_->fifo_per_movement();
+    bool remaining = false;
+
+    while (!act.empty()) {
+        // draw an in-link with probability proportional to capacity
+        const double u = (splitmix64(st) >> 11) * (1.0 / 9007199254740992.0) * total;
+        std::size_t pick = act.size() - 1;
+        double acc = 0.0;
+        for (std::size_t i = 0; i < act.size(); ++i) {
+            acc += act[i].second;
+            if (u < acc) { pick = i; break; }
+        }
+        const EdgeId ein = act[pick].first;
+        total -= act[pick].second;
+        act[pick] = act.back();
+        act.pop_back();
+
+        auto& buf = qbuf_[ein];
+        std::vector<EdgeId> blocked_mv;   // per-movement FIFO: movements blocked this step
+        for (std::size_t i = 0; i < buf.size();) {
+            const AgentId a = buf[i];
+            // teleported or otherwise gone from this link: drop the stale entry
+            if (a >= hot_.size() || hot_.state[a] != AgentState::OnLink || hot_.current_edge[a] != ein) {
+                buf.erase(buf.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            const uint16_t pos = hot_.route_pos[a] + 1;
+            auto route = routes_.get_route(a);
+            const EdgeId next = (pos < route.size()) ? route[pos] : kInvalidEdge;
+            const EdgeId next_after = (pos + 1u < route.size()) ? route[pos + 1u] : kInvalidEdge;
+            if (per_mv && std::find(blocked_mv.begin(), blocked_mv.end(), next) != blocked_mv.end()) {
+                ++i; continue;
+            }
+            if (traffic_->on_exit_to(ein, next, next_after, a, t)) {
+                buf.erase(buf.begin() + static_cast<std::ptrdiff_t>(i));
+                complete_exit(a, ein, next, t);
+                continue;
+            }
+            // Not admitted. Plain FIFO: the whole link waits. Per movement:
+            // only this movement waits, unless the block is on the link's own
+            // discharge (downstream has room), which stops the link.
+            if (!per_mv || next == kInvalidEdge || traffic_->has_capacity_for(next, next_after)) break;
+            blocked_mv.push_back(next);
+            ++i;
+        }
+        if (!buf.empty()) remaining = true;
+    }
+    if (remaining) schedule_node_step(n, t);
 }
 
 void Simulation::handle_arrive_activity(const Event& e) {
@@ -733,6 +876,7 @@ void Simulation::run_until(SimTime until) {
         spdlog::info("Reroute router: A* with traffic costs");
     }
 
+    init_qnode();
     inject_demand();
     current_time_.store(cfg_.start_time);
 
