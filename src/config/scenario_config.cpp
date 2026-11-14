@@ -206,6 +206,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.output.td_bin_s            = o.value("td_bin_s",            cfg.output.td_bin_s);
         if (o.contains("trace_edges"))
             cfg.output.trace_edges = o["trace_edges"].get<std::vector<uint32_t>>();
+        cfg.output.routes_only         = o.value("routes_only",         cfg.output.routes_only);
     }
 
     log_summary(cfg);

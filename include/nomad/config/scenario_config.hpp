@@ -124,6 +124,9 @@ struct OutputConfig {
     // agent's full current route, to <output_dir>/edge_traces.csv.
     // Output only; does not affect the dynamics.
     std::vector<uint32_t> trace_edges;
+    // Diagnostic: compute the pre-trip routes of the whole demand and stop
+    // before any dynamics (pair with trace_edges to dump routes). Output only.
+    bool routes_only = false;
 };
 
 // ── Top-level scenario configuration ─────────────────────────────────────────

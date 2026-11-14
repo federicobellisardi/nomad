@@ -297,7 +297,42 @@ static int run_scenario(ScenarioConfig cfg) {
     // ── Run ───────────────────────────────────────────────────────────────────
     spdlog::info("Starting simulation: {:.0f}s – {:.0f}s",
                   cfg.simulation.start_time, cfg.simulation.end_time);
-    sim.run();
+    if (cfg.output.routes_only) {
+        // inject the whole day's demand and pre-route it, no dynamics
+        spdlog::info("routes_only: pre-routing the demand, no simulation");
+        sim.run_until(cfg.simulation.start_time);
+    } else {
+        sim.run();
+    }
+
+    // Diagnostic: current route of every car agent whose route uses a traced
+    // edge, at the end of the run. With end_time == start_time this is the
+    // pre-trip route set (no dynamics). Output only.
+    if (!cfg.output.trace_edges.empty()) {
+        std::unordered_set<uint32_t> traced(cfg.output.trace_edges.begin(),
+                                            cfg.output.trace_edges.end());
+        auto path = cfg.output.output_dir / "routes_through_traced.csv";
+        std::ofstream out(path);
+        out << "agent,origin,dest,depart_s,route\n";
+        const auto& hot  = sim.agent_hot();
+        const auto& cold = sim.agent_cold();
+        std::size_t n = 0;
+        for (AgentId a = 0; a < static_cast<AgentId>(cold.size()); ++a) {
+            if (hot.mode[a] != AgentMode::Car) continue;
+            auto route = sim.route_store().get_route(a);
+            bool hit = false;
+            for (EdgeId x : route) if (traced.count(x)) { hit = true; break; }
+            if (!hit) continue;
+            const auto& pl = cold.plans[a];
+            out << a << ',' << (pl.activities.size() > 0 ? pl.activities[0].location : 0) << ','
+                << (pl.activities.size() > 1 ? pl.activities[1].location : 0) << ','
+                << (pl.activities.size() > 0 ? pl.activities[0].start_time : 0.0) << ',';
+            for (std::size_t i = 0; i < route.size(); ++i) out << (i ? ";" : "") << route[i];
+            out << '\n';
+            ++n;
+        }
+        spdlog::info("Routes through traced edges: {} agents -> {}", n, path.string());
+    }
 
     auto t1 = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
