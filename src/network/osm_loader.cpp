@@ -332,6 +332,7 @@ struct NomadWayHandler : osmium::handler::Handler {
             fwd.speed_ms  = speed_ms;
             fwd.capacity  = cap_fwd;
             fwd.lanes     = lanes_fwd;
+            fwd.along_way = !reversed;
             fwd.road_class= static_cast<uint8_t>(defaults.klass);
             fwd.flags     = flags;
             fwd.way_meta_idx = meta_idx;
@@ -344,6 +345,7 @@ struct NomadWayHandler : osmium::handler::Handler {
                 rev.from_node = nB.ref();
                 rev.to_node   = nA.ref();
                 rev.flags     |= EdgeFlags::Reversed;
+                rev.along_way = false;
                 rev.capacity  = cap_bwd;
                 rev.lanes     = lanes_bwd;
                 raw_edges.push_back(rev);
@@ -354,6 +356,7 @@ struct NomadWayHandler : osmium::handler::Handler {
                 RawEdge rev  = fwd;
                 rev.from_node = fwd.to_node;
                 rev.to_node   = fwd.from_node;
+                rev.along_way = !fwd.along_way;
                 rev.road_class = static_cast<uint8_t>(footway.klass);
                 rev.speed_ms  = footway.default_speed_kmh / 3.6f;
                 rev.capacity  = footway.default_lanes * footway.capacity_per_lane_veh_h;
@@ -389,6 +392,12 @@ struct NomadNodeHandler : osmium::handler::Handler {
         IntersectionMeta meta;
         meta.osm_id = node.id();
         meta.type   = type;
+        // Approach the control applies to (OSM: traffic_signals:direction for
+        // signals, direction for stop/give_way), relative to the way's order.
+        const char* dir = node.tags()[type == IntersectionType::TrafficSignal
+                                          ? "traffic_signals:direction" : "direction"];
+        if (dir && std::string(dir) == "forward")  meta.direction = 1;
+        if (dir && std::string(dir) == "backward") meta.direction = -1;
 
         if (type == IntersectionType::TrafficSignal) {
             SignalPhase phase;
@@ -541,20 +550,21 @@ Graph OsmLoader::build_graph(
         ed.flags           = re.flags;
         ed.way_meta_idx    = re.way_meta_idx;
 
-        // Intersection capacity derating (HCM/TCQSM, see intersection.hpp) --
-        // applied per effective_capacity()'s own doc comment ("at the edge's
-        // source node"): a signal/stop/roundabout at the node this edge
-        // LEAVES FROM constrains how much of re.capacity's mid-block
-        // throughput actually gets discharged onto it. Nodes with no
-        // intersection metadata (the common case -- only traffic_signals/
-        // stop/give_way/mini_roundabout tagged nodes are recorded) fall
-        // through to effective_capacity()'s IntersectionType::Simple default,
-        // which returns base_capacity unchanged.
+        // Intersection capacity derating (HCM/TCQSM, see intersection.hpp).
+        // The traffic models enforce an edge's capacity where vehicles leave
+        // it (its target node), so a signal/stop/mini-roundabout constrains
+        // the edges ARRIVING at it: the approaches. (Derating the edges that
+        // leave the node put the constraint one node downstream, on every
+        // departure.) A direction tag restricts it to one approach. Nodes
+        // without intersection metadata keep base capacity.
         float capacity = re.capacity;
-        if (auto it = intersections_.find(re.from_node); it != intersections_.end()) {
-            const SignalPhase* phase =
-                it->second.phases.empty() ? nullptr : &it->second.phases[0];
-            capacity = effective_capacity(capacity, it->second.type, phase);
+        if (auto it = intersections_.find(re.to_node); it != intersections_.end()) {
+            const IntersectionMeta& im = it->second;
+            const bool applies = im.direction == 0 || (im.direction > 0) == re.along_way;
+            if (applies) {
+                const SignalPhase* phase = im.phases.empty() ? nullptr : &im.phases[0];
+                capacity = effective_capacity(capacity, im.type, phase);
+            }
         }
         ed.capacity = capacity;
         edge_lanes[eid] = re.lanes;

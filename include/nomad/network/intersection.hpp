@@ -36,6 +36,9 @@ struct IntersectionMeta {
     IntersectionType      type;
     std::vector<SignalPhase>      phases;  // empty for unsignalized
     std::vector<TurnRestriction>  turns;   // from OSM restriction relations
+    // Approach the control applies to, relative to the OSM way's node order
+    // (traffic_signals:direction / direction): +1 forward, -1 backward, 0 all.
+    int8_t                direction = 0;
 };
 
 // ── Capacity derate factors (from HCM / TCQSM) ────────────────────────────────
@@ -55,8 +58,10 @@ struct SignalDefaults {
     float green_frac    = 0.45f;
 };
 
-// Compute the effective capacity for an outgoing edge, given the intersection
-// type and signal schedule at the edge's source node.
+// Compute the effective capacity of an edge that ARRIVES at a control node
+// (an approach), given the node's intersection type and signal schedule. The
+// traffic models enforce an edge's capacity where vehicles leave it, i.e. at
+// its target node, so the approach is the edge the control constrains.
 float effective_capacity(float base_capacity,
                           IntersectionType type,
                           const SignalPhase* phase = nullptr) noexcept;

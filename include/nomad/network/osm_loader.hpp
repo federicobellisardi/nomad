@@ -59,6 +59,7 @@ struct RawEdge {
     float     speed_ms;
     float     capacity;
     float     lanes = 1.0f; // lanes in this edge's direction
+    bool      along_way = true; // runs in the OSM way's node order
     uint8_t   road_class;
     uint8_t   flags;        // EdgeFlags bitmask
     uint16_t  way_meta_idx;
