@@ -109,6 +109,9 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.routing.use_traffic_costs   = r.value("use_traffic_costs",   cfg.routing.use_traffic_costs);
         cfg.routing.randomization_sigma = r.value("randomization_sigma", cfg.routing.randomization_sigma);
         cfg.routing.td_costs_in         = r.value("td_costs_in",         cfg.routing.td_costs_in);
+        cfg.routing.routes_in           = r.value("routes_in",           cfg.routing.routes_in);
+        cfg.routing.replan_fraction     = r.value("replan_fraction",     cfg.routing.replan_fraction);
+        cfg.routing.replan_seed         = r.value("replan_seed",         cfg.routing.replan_seed);
         if (r.contains("ch_cache"))
             cfg.routing.ch_cache = r["ch_cache"].get<std::string>();
     }
@@ -203,6 +206,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.output.store_trajectories  = o.value("store_trajectories",  cfg.output.store_trajectories);
         cfg.output.store_link_stats    = o.value("store_link_stats",    cfg.output.store_link_stats);
         cfg.output.td_costs_out        = o.value("td_costs_out",        cfg.output.td_costs_out);
+        cfg.output.routes_out          = o.value("routes_out",          cfg.output.routes_out);
         cfg.output.td_bin_s            = o.value("td_bin_s",            cfg.output.td_bin_s);
         if (o.contains("trace_edges"))
             cfg.output.trace_edges = o["trace_edges"].get<std::vector<uint32_t>>();
@@ -260,6 +264,11 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["routing"]["use_traffic_costs"]= cfg.routing.use_traffic_costs;
     if (!cfg.routing.td_costs_in.empty())
         j["routing"]["td_costs_in"]  = cfg.routing.td_costs_in;
+    if (!cfg.routing.routes_in.empty()) {
+        j["routing"]["routes_in"]       = cfg.routing.routes_in;
+        j["routing"]["replan_fraction"] = cfg.routing.replan_fraction;
+        j["routing"]["replan_seed"]     = cfg.routing.replan_seed;
+    }
 
     j["traffic"]["model"]                    = cfg.traffic.model;
     j["traffic"]["ltm_discharge_cap"]        = cfg.traffic.ltm_discharge_cap;
@@ -281,6 +290,8 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     }
     if (!cfg.output.trace_edges.empty())
         j["output"]["trace_edges"]     = cfg.output.trace_edges;
+    if (!cfg.output.routes_out.empty())
+        j["output"]["routes_out"]      = cfg.output.routes_out;
 
     std::ofstream f(json_path);
     f << j.dump(2);
@@ -303,6 +314,8 @@ std::string ScenarioConfigIO::validate(const ScenarioConfig& cfg) {
         return "demand.od_csv is required when demand.source = od_csv";
     if (cfg.simulation.node_model != "agent" && cfg.simulation.node_model != "qnode")
         return "simulation.node_model must be \"agent\" or \"qnode\"";
+    if (!(cfg.routing.replan_fraction >= 0.0f && cfg.routing.replan_fraction <= 1.0f))
+        return "routing.replan_fraction must be in [0, 1]";
     return {};
 }
 

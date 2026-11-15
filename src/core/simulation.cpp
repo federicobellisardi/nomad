@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -18,6 +20,100 @@
 #include <spdlog/spdlog.h>
 
 namespace nomad {
+
+namespace {
+inline uint64_t splitmix64(uint64_t& x) {
+    uint64_t z = (x += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+// Route plan file (Simulation::write_routes / set_replanning), little endian:
+//   "NRTE" u32 version=1 u32 num_edges u32 n_agents
+//   per agent: u32 origin u32 dest f64 depart u32 mode u32 len u32 edges[len]
+// len = 0 for agents without a route.
+constexpr char     kRoutesMagic[4] = {'N', 'R', 'T', 'E'};
+constexpr uint32_t kRoutesVersion  = 1;
+
+struct StoredPlan {
+    NodeId origin = kInvalidNode, dest = kInvalidNode;
+    double depart = 0.0;
+    uint32_t mode = 0;
+    std::vector<EdgeId> edges;
+};
+
+std::vector<StoredPlan> read_routes(const std::filesystem::path& p, std::size_t num_edges) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("routes_in: cannot open " + p.string());
+    char magic[4]; uint32_t ver = 0, ne = 0, na = 0;
+    f.read(magic, 4);
+    f.read(reinterpret_cast<char*>(&ver), 4);
+    f.read(reinterpret_cast<char*>(&ne), 4);
+    f.read(reinterpret_cast<char*>(&na), 4);
+    if (!f || std::memcmp(magic, kRoutesMagic, 4) != 0 || ver != kRoutesVersion)
+        throw std::runtime_error("routes_in: " + p.string() + " is not a route plan file v1");
+    if (ne != num_edges)
+        throw std::runtime_error("routes_in: edge count does not match the graph");
+    std::vector<StoredPlan> out(na);
+    for (auto& sp : out) {
+        uint32_t len = 0;
+        f.read(reinterpret_cast<char*>(&sp.origin), 4);
+        f.read(reinterpret_cast<char*>(&sp.dest), 4);
+        f.read(reinterpret_cast<char*>(&sp.depart), 8);
+        f.read(reinterpret_cast<char*>(&sp.mode), 4);
+        f.read(reinterpret_cast<char*>(&len), 4);
+        sp.edges.resize(len);
+        if (len) f.read(reinterpret_cast<char*>(sp.edges.data()), 4 * std::streamsize(len));
+        if (!f) throw std::runtime_error("routes_in: truncated file " + p.string());
+    }
+    return out;
+}
+
+// A stored route is reusable only if it is a connected path origin -> dest.
+bool route_connects(const Graph& g, NodeId origin, NodeId dest, const std::vector<EdgeId>& r) {
+    if (r.empty()) return false;
+    NodeId at = origin;
+    for (EdgeId e : r) {
+        if (e >= g.num_edges() || at >= g.num_nodes()) return false;
+        auto out = g.out_edges(at);
+        if (std::find(out.begin(), out.end(), e) == out.end()) return false;
+        at = g.edges[e].target;
+    }
+    return at == dest;
+}
+} // namespace
+
+void Simulation::write_routes(const std::filesystem::path& p) const {
+    std::ofstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("routes_out: cannot open " + p.string());
+    const uint32_t ne = static_cast<uint32_t>(graph_->num_edges());
+    const uint32_t na = static_cast<uint32_t>(hot_.size());
+    f.write(kRoutesMagic, 4);
+    f.write(reinterpret_cast<const char*>(&kRoutesVersion), 4);
+    f.write(reinterpret_cast<const char*>(&ne), 4);
+    f.write(reinterpret_cast<const char*>(&na), 4);
+    for (AgentId a = 0; a < na; ++a) {
+        const auto& plan = cold_.plans[a];
+        const bool has = plan.activities.size() >= 2;
+        const uint32_t o = has ? plan.activities[0].location : kInvalidNode;
+        const uint32_t d = has ? plan.activities[1].location : kInvalidNode;
+        const double  t = has ? plan.activities[0].start_time : 0.0;
+        const uint32_t m = static_cast<uint32_t>(plan.preferred_mode);
+        static const std::vector<EdgeId> kEmpty;
+        const auto& r = a < routes_.routes.size() ? routes_.routes[a] : kEmpty;
+        const uint32_t len = static_cast<uint32_t>(r.size());
+        f.write(reinterpret_cast<const char*>(&o), 4);
+        f.write(reinterpret_cast<const char*>(&d), 4);
+        f.write(reinterpret_cast<const char*>(&t), 8);
+        f.write(reinterpret_cast<const char*>(&m), 4);
+        f.write(reinterpret_cast<const char*>(&len), 4);
+        if (len) f.write(reinterpret_cast<const char*>(r.data()), 4 * std::streamsize(len));
+    }
+    if (!f) throw std::runtime_error("routes_out: write failed " + p.string());
+    spdlog::info("Route plans of {} agents written to {}", na, p.string());
+}
+
 
 struct Simulation::Impl {
     tbb::task_arena arena;
@@ -118,6 +214,37 @@ void Simulation::inject_demand() {
             spdlog::info("Per-edge stochastic pre-routing enabled (sigma={:.2f})", sigma);
     }
 
+    // ── Partial replanning: keep the stored plans of agents not drawn ─────────
+    std::vector<StoredPlan> stored;
+    std::vector<uint8_t>    keep;
+    n_plan_kept_ = n_plan_rerouted_ = n_plan_mismatch_ = 0;
+    if (!routes_in_.empty()) {
+        stored = read_routes(routes_in_, graph_->num_edges());
+        keep.assign(n, 0);
+        for (AgentId a = 0; a < static_cast<AgentId>(n); ++a) {
+            const auto& plan = cold_.plans[a];
+            if (plan.activities.size() < 2) continue;
+            const bool match = a < stored.size()
+                && stored[a].origin == plan.activities[0].location
+                && stored[a].dest   == plan.activities[1].location
+                && std::abs(stored[a].depart - plan.activities[0].start_time) < 1e-6
+                && stored[a].mode   == static_cast<uint32_t>(plan.preferred_mode)
+                && route_connects(*graph_, stored[a].origin, stored[a].dest, stored[a].edges);
+            if (!match) { ++n_plan_mismatch_; continue; }
+            uint64_t st = (static_cast<uint64_t>(replan_seed_) << 32) ^ a ^ 0x5EED9A7A11ull;
+            const double u = (splitmix64(st) >> 11) * (1.0 / 9007199254740992.0);
+            if (u >= replan_fraction_) { keep[a] = 1; ++n_plan_kept_; }
+            else ++n_plan_rerouted_;
+        }
+        spdlog::info("Replanning (fraction {:.3f}, seed {}): {} plans kept, {} re-routed, "
+                     "{} without a matching stored plan (re-routed)",
+                     replan_fraction_, replan_seed_, n_plan_kept_, n_plan_rerouted_, n_plan_mismatch_);
+        if (n_plan_mismatch_ > n / 100)
+            spdlog::warn("  {} agents did not match their stored plan: is the demand "
+                         "(seed, scale, OD file) identical to the previous iteration?",
+                         n_plan_mismatch_);
+    }
+
     std::atomic<std::size_t> progress{0};
     std::atomic<uint64_t>    n_stoch{0};
     std::atomic<uint64_t>    n_fallback{0};
@@ -127,6 +254,11 @@ void Simulation::inject_demand() {
                 for (AgentId a = rng.begin(); a < rng.end(); ++a) {
                     const auto& plan = cold_.plans[a];
                     if (plan.activities.size() < 2) continue;
+                    if (!keep.empty() && keep[a]) {
+                        route_results[a].edges    = std::move(stored[a].edges);
+                        route_results[a].is_valid = true;
+                        continue;
+                    }
                     RoutingRequest req{
                         plan.activities[0].location,
                         plan.activities[1].location,
@@ -182,6 +314,9 @@ void Simulation::inject_demand() {
             ++failed;
         }
     }
+
+    { std::vector<StoredPlan>().swap(stored); }
+    if (!routes_out_.empty()) write_routes(routes_out_);
 
     auto elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
@@ -465,14 +600,6 @@ void Simulation::schedule_node_step(NodeId n, SimTime t) {
     eq_.push({ts, kNoAgent, n, EventType::NodeStep, {}});
 }
 
-namespace {
-inline uint64_t splitmix64(uint64_t& x) {
-    uint64_t z = (x += 0x9E3779B97F4A7C15ull);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
-}
-} // namespace
 
 void Simulation::handle_node_step(const Event& e) {
     const NodeId n = e.payload;

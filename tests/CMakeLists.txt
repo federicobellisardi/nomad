@@ -16,6 +16,7 @@ add_executable(nomad_tests
     unit/test_priority.cpp
     unit/test_osm_derating.cpp
     unit/test_qnode.cpp
+    unit/test_replanning.cpp
     integration/test_simulation_synthetic.cpp
 )
 

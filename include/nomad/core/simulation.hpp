@@ -106,6 +106,21 @@ public:
     void enable_td_recording(float bin_s);
     void write_td_costs(const std::filesystem::path& p) const;
 
+    // Partial replanning (MATSim-style day-to-day learning). set_routes_out():
+    // write every agent's route plan right after pre-routing. set_replanning():
+    // read the plans of the previous iteration; an agent whose stored plan
+    // matches its trip (same origin, destination, departure, mode, and a
+    // route that is still a connected path on this graph) keeps it with
+    // probability 1 - fraction and is routed afresh otherwise. The draw is a
+    // hash of (seed, agent id): use a different seed every iteration.
+    void set_routes_out(std::filesystem::path p) { routes_out_ = std::move(p); }
+    void set_replanning(std::filesystem::path routes_in, float fraction, uint32_t seed) {
+        routes_in_ = std::move(routes_in); replan_fraction_ = fraction; replan_seed_ = seed;
+    }
+    std::size_t replan_kept()     const { return n_plan_kept_; }
+    std::size_t replan_rerouted() const { return n_plan_rerouted_; }
+    std::size_t replan_mismatch() const { return n_plan_mismatch_; }
+
     // Register a callback invoked whenever an event of the given type fires.
     // Callbacks run on the thread pool — must be thread-safe.
     // Use a mutex or atomic if state is shared with Python.
@@ -210,6 +225,11 @@ private:
     std::unique_ptr<AStarRouter>        reroute_router_;
     std::shared_ptr<const TdCostTable>  td_in_;
     std::unique_ptr<TdCostRecorder>     td_rec_;
+    std::filesystem::path               routes_out_, routes_in_;
+    float                               replan_fraction_ = 1.0f;
+    uint32_t                            replan_seed_     = 0;
+    std::size_t n_plan_kept_ = 0, n_plan_rerouted_ = 0, n_plan_mismatch_ = 0;
+    void write_routes(const std::filesystem::path& p) const;
     std::vector<std::unique_ptr<IOutputWriter>> writers_;
 
     EventQueue     eq_;

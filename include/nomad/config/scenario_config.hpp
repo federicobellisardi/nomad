@@ -47,6 +47,15 @@ struct RoutingConfig {
     // Day-to-day assignment: pre-route cars on these time-dependent link
     // travel times (TdCostTable file from a previous iteration). Empty = off.
     std::string td_costs_in;
+    // Partial replanning (MATSim-style). routes_in: route plans of the
+    // previous iteration (written via output.routes_out). Each agent whose
+    // stored plan still matches its trip re-routes with probability
+    // replan_fraction and otherwise keeps its stored route; the draw depends
+    // on (replan_seed, agent), so change replan_seed every iteration.
+    // Empty routes_in = every agent is routed (replan_fraction ignored).
+    std::string routes_in;
+    float       replan_fraction = 1.0f;
+    uint32_t    replan_seed     = 0;
 };
 
 struct TrafficConfig {
@@ -119,6 +128,8 @@ struct OutputConfig {
     // Experienced car link travel times by entry-time bin (TdCostTable file),
     // written at the end of the run. Empty = off.
     std::string td_costs_out;
+    // Route plans after pre-routing (input for routing.routes_in). Empty = off.
+    std::string routes_out;
     float       td_bin_s = 900.0f;
     // Diagnostic: log every car/walk/bike entry onto these edges, with the
     // agent's full current route, to <output_dir>/edge_traces.csv.
