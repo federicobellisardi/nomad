@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include <nomad/core/agent.hpp>
 #include <nomad/core/event.hpp>
 #include <nomad/core/graph.hpp>
@@ -211,6 +213,8 @@ private:
     void fire_hooks                 (EventType type, const Event& e);
     // Edge the agent takes after the one it is on (kInvalidEdge at trip end).
     EdgeId next_edge_after_current(AgentId a, std::size_t ahead = 1) const;
+    // Edges of the agent's route after the one it is on (empty if none).
+    std::span<const EdgeId> route_after(AgentId a) const;
 
     // Compute next route for an agent (CH or A* depending on router_)
     std::vector<EdgeId> compute_route(AgentId a);

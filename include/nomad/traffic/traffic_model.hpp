@@ -165,10 +165,33 @@ public:
     // (next link) rather than per link, i.e. a blocked movement does not
     // block vehicles heading elsewhere (multi-lane approach).
     virtual bool fifo_per_movement() const { return false; }
-    // QNode node model: true if the per-movement FIFO is keyed by the next
-    // two links (lane group chosen for the turn after next), so a blocked
-    // diverge one link downstream does not block the other lane groups.
+    // QNode node model: true if the per-movement FIFO is keyed by the lane
+    // group (fifo_group), not by the next link.
     virtual bool fifo_lookahead() const { return false; }
+
+    // ── Path-aware variants (used by the engine) ──
+    // `after` = the edges the agent takes after e, in order (after[0] = next).
+    // Defaults reduce to the movement-aware versions above.
+    static EdgeId at(std::span<const EdgeId> after, std::size_t k) {
+        return k < after.size() ? after[k] : kInvalidEdge;
+    }
+    virtual bool has_capacity_path(EdgeId e, std::span<const EdgeId> after) const {
+        return has_capacity_for(e, at(after, 0), at(after, 1));
+    }
+    virtual bool has_capacity_departure_path(EdgeId e, std::span<const EdgeId> after) const {
+        return has_capacity_departure(e, at(after, 0), at(after, 1));
+    }
+    virtual bool on_exit_path(EdgeId e, std::span<const EdgeId> after, AgentId a, SimTime t) {
+        return on_exit_to(e, at(after, 0), at(after, 1), a, t, at(after, 2));
+    }
+    virtual void assign_movement_path(EdgeId e, AgentId a, std::span<const EdgeId> after) {
+        assign_movement(e, a, at(after, 0), at(after, 1));
+    }
+    // QNode per-movement FIFO key of a vehicle on e (vehicles with the same
+    // key queue behind each other). Default: the next link.
+    virtual EdgeId fifo_group(EdgeId e, std::span<const EdgeId> after) const {
+        (void)e; return at(after, 0);
+    }
 
     virtual std::string_view model_name() const = 0;
 

@@ -109,34 +109,77 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
         mv_off_[E] = off;
         mv_occ_.assign(off, 0);
         if (cfg_.movement_lookahead) {
-            // one group counter per (e, next, next_after)
-            mv2_off_.assign(off + 1, 0);
-            uint32_t off2 = 0;
-            for (uint32_t e = 0; e < E; ++e) {
-                NodeId u = graph.edges[e].target;
-                if (u >= graph.num_nodes()) continue;
-                for (uint32_t k = graph.row_ptr[u]; k < graph.row_ptr[u + 1]; ++k) {
-                    mv2_off_[mv_off_[e] + (k - graph.row_ptr[u])] = off2;
-                    NodeId w = graph.edges[graph.col_idx[k]].target;
-                    if (w < graph.num_nodes()) off2 += graph.row_ptr[w + 1] - graph.row_ptr[w];
-                }
+            const uint32_t N = graph.num_nodes();
+            car_outdeg_.assign(N, 0);
+            for (uint32_t u = 0; u < N; ++u) {
+                int d = 0;
+                for (EdgeId x : graph.out_edges(u))
+                    if (edge_accessible(graph.edges[x].road_class, graph.edges[x].flags, AgentMode::Car)) ++d;
+                car_outdeg_[u] = static_cast<uint8_t>(std::min(d, 2));
             }
-            mv2_off_[off] = off2;
-            mv2_occ_.assign(off2, 0);
         }
     }
 }
 
-uint32_t LtmTrafficModel::group_slot(EdgeId e, EdgeId next, EdgeId next_after) const {
-    if (mv2_off_.empty() || next_after == kInvalidEdge || next >= graph_.num_edges()) return kNoSlot;
-    const uint32_t s = movement_slot(e, next);
-    if (s == kNoSlot) return kNoSlot;
-    NodeId w = graph_.edges[next].target;
-    if (w >= graph_.num_nodes()) return kNoSlot;
-    const uint32_t b = graph_.row_ptr[w], end = graph_.row_ptr[w + 1];
-    for (uint32_t k = b; k < end; ++k)
-        if (graph_.col_idx[k] == next_after) return mv2_off_[s] + (k - b);
-    return kNoSlot;
+LtmTrafficModel::Group LtmTrafficModel::lane_group(EdgeId e, std::span<const EdgeId> after) const {
+    Group g;
+    if (car_outdeg_.empty() || e >= graph_.num_edges()) return g;
+    NodeId u = graph_.edges[e].target;
+    float minl = 1e9f;
+    for (EdgeId x : after) {
+        if (x >= graph_.num_edges() || u >= car_outdeg_.size()) return Group{};
+        minl = std::min(minl, lanes_[x]);
+        if (car_outdeg_[u] > 1) { g.branch = x; g.lanes = minl; return g; }
+        u = graph_.edges[x].target;
+    }
+    return Group{};
+}
+
+bool LtmTrafficModel::group_has_room(EdgeId e, const Group& g) const {
+    if (g.branch == kInvalidEdge) return true;
+    auto it = grp_occ_.find(group_key(e, g.branch));
+    const int32_t occ = it == grp_occ_.end() ? 0 : it->second;
+    const float share = std::min(1.0f, g.lanes / lanes_[e]);
+    return static_cast<float>(occ) < std::max(1.0f, cells_[e].storage_veh * share);
+}
+
+bool LtmTrafficModel::has_capacity_path(EdgeId e, std::span<const EdgeId> after) const {
+    if (!has_capacity_for(e, at(after, 0))) return false;
+    if (!fifo_lookahead()) return true;
+    return group_has_room(e, lane_group(e, after));
+}
+
+bool LtmTrafficModel::has_capacity_departure_path(EdgeId e, std::span<const EdgeId> after) const {
+    if (!has_capacity_path(e, after)) return false;
+    if (major_in_.empty() || e >= graph_.num_edges()) return true;
+    const Cell& c = cells_[e];
+    return c.storage_veh - static_cast<float>(c.occupancy) > cfg_.priority_reserve_veh;
+}
+
+bool LtmTrafficModel::on_exit_path(EdgeId e, std::span<const EdgeId> after, AgentId a, SimTime t) {
+    const EdgeId next = at(after, 0);
+    // spillback on `next`, for the agent's movement / lane group there
+    const bool room = next == kInvalidEdge || next >= graph_.num_edges() ||
+                      has_capacity_path(next, after.subspan(1));
+    return on_exit_gate(e, next, room, a, t);
+}
+
+void LtmTrafficModel::assign_movement_path(EdgeId e, AgentId a, std::span<const EdgeId> after) {
+    assign_movement(e, a, at(after, 0));
+    if (!fifo_lookahead()) return;
+    const Group g = lane_group(e, after);
+    if (g.branch == kInvalidEdge) return;
+    if (a >= agent_grp_.size())
+        agent_grp_.resize(std::max<std::size_t>(a + 1, agent_grp_.size() * 2), ~uint64_t{0});
+    const uint64_t k = group_key(e, g.branch);
+    ++grp_occ_[k];
+    agent_grp_[a] = k;
+}
+
+EdgeId LtmTrafficModel::fifo_group(EdgeId e, std::span<const EdgeId> after) const {
+    if (!fifo_lookahead()) return at(after, 0);
+    const Group g = lane_group(e, after);
+    return g.branch == kInvalidEdge ? at(after, 0) : g.branch;
 }
 
 uint32_t LtmTrafficModel::movement_slot(EdgeId e, EdgeId next) const {
@@ -155,9 +198,10 @@ float LtmTrafficModel::movement_cap(EdgeId e, EdgeId next) const {
 }
 
 void LtmTrafficModel::release_movement(AgentId a) {
-    if (a < agent_slot2_.size() && agent_slot2_[a] != kNoSlot) {
-        if (mv2_occ_[agent_slot2_[a]] > 0) --mv2_occ_[agent_slot2_[a]];
-        agent_slot2_[a] = kNoSlot;
+    if (a < agent_grp_.size() && agent_grp_[a] != ~uint64_t{0}) {
+        auto it = grp_occ_.find(agent_grp_[a]);
+        if (it != grp_occ_.end() && --it->second <= 0) grp_occ_.erase(it);
+        agent_grp_[a] = ~uint64_t{0};
     }
     if (a >= agent_slot_.size()) return;
     uint32_t s = agent_slot_[a];
@@ -170,17 +214,12 @@ void LtmTrafficModel::assign_movement(EdgeId e, AgentId a, EdgeId next, EdgeId n
     if (!cfg_.movement_storage) return;
     if (a >= agent_slot_.size())
         agent_slot_.resize(std::max<std::size_t>(a + 1, agent_slot_.size() * 2), kNoSlot);
-    if (!mv2_off_.empty() && a >= agent_slot2_.size())
-        agent_slot2_.resize(std::max<std::size_t>(a + 1, agent_slot2_.size() * 2), kNoSlot);
     release_movement(a);
     uint32_t s = movement_slot(e, next);
     if (s == kNoSlot) return;
     ++mv_occ_[s];
     agent_slot_[a] = s;
-    uint32_t g = group_slot(e, next, next_after);
-    if (g == kNoSlot) return;
-    ++mv2_occ_[g];
-    agent_slot2_[a] = g;
+    (void)next_after;
 }
 
 bool LtmTrafficModel::has_capacity_for(EdgeId e, EdgeId next, EdgeId next_after) const {
@@ -188,11 +227,8 @@ bool LtmTrafficModel::has_capacity_for(EdgeId e, EdgeId next, EdgeId next_after)
     if (!cfg_.movement_storage) return true;
     uint32_t s = movement_slot(e, next);
     if (s == kNoSlot) return true;
-    if (static_cast<float>(mv_occ_[s]) >= movement_cap(e, next)) return false;
-    uint32_t g = group_slot(e, next, next_after);
-    if (g == kNoSlot) return true;
-    const float share = std::min(1.0f, std::min(lanes_[next], lanes_[next_after]) / lanes_[e]);
-    return static_cast<float>(mv2_occ_[g]) < std::max(1.0f, cells_[e].storage_veh * share);
+    (void)next_after;
+    return static_cast<float>(mv_occ_[s]) < movement_cap(e, next);
 }
 
 float LtmTrafficModel::travel_time_for(EdgeId e) const {
@@ -262,6 +298,13 @@ bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId a, SimTime t) {
 
 bool LtmTrafficModel::on_exit_to(EdgeId e, EdgeId next, EdgeId next_after,
                                  AgentId a, SimTime t, EdgeId next_after2) {
+    (void)next_after2;
+    const bool room = next == kInvalidEdge || next >= graph_.num_edges() ||
+                      has_capacity_for(next, next_after);
+    return on_exit_gate(e, next, room, a, t);
+}
+
+bool LtmTrafficModel::on_exit_gate(EdgeId e, EdgeId next, bool room, AgentId a, SimTime t) {
     if (e >= graph_.num_edges()) return true;
     Cell& c = cells_[e];
 
@@ -282,8 +325,7 @@ bool LtmTrafficModel::on_exit_to(EdgeId e, EdgeId next, EdgeId next_after,
     // storage. This is the behaviour QueueTrafficModel does not have — it
     // lets congestion genuinely propagate backward instead of only raising
     // the current link's own travel time. Always active, not opt-in.
-    bool spillback_blocked =
-        next != kInvalidEdge && next < graph_.num_edges() && !has_capacity_for(next, next_after, next_after2);
+    bool spillback_blocked = !room;
     // Node priority: a minor approach keeps a free-storage reserve on `next`.
     if (!spillback_blocked && !major_in_.empty() && next != kInvalidEdge &&
         next < graph_.num_edges() && major_in_[next] != e) {

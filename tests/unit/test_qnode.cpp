@@ -181,25 +181,41 @@ TEST_CASE("QNode: with movement storage, FIFO holds per movement", "[traffic][qn
 }
 
 namespace {
-// Diverge one link downstream (MATSim-style gore micro-link):
-// 0 -e0 (3 lanes, 300 m)-> 1 -e1 (17 m, 4 lanes)-> 2;
-// 2 -e2 (1-lane ramp)-> 3 -e3 (60 veh/h bottleneck)-> 4;  2 -e4 (3-lane through)-> 5.
-Graph make_gore() {
-    Graph g;
-    g.nodes.resize(6);
-    for (int i = 0; i < 6; ++i) g.nodes[i] = {static_cast<float>(i) * 0.003f, 0.0f, 0, 0, 0, static_cast<uint32_t>(i)};
-    g.nodes[3].lat = -0.003f; g.nodes[4].lat = -0.006f;
-    g.row_ptr = {0, 1, 2, 4, 5, 5, 5};
-    g.col_idx = {0, 1, 2, 4, 3};
-    g.edges = {mk(1, 300.0f, 4800.0f), mk(2, 17.0f, 6400.0f), mk(3, 100.0f, 1600.0f),
-               mk(4, 100.0f, 60.0f), mk(5, 200.0f, 4800.0f)};
-    g.geom_ptr.assign(6, 0);
-    return g;
+// Diverge `chain` short links downstream of the observed approach e0:
+// 0 -e0 (3 lanes, 300 m)-> 1 -(chain x 17 m, 4 lanes)-> D;
+// D -ramp (1 lane)-> R -(60 veh/h bottleneck)-> X;  D -through (3 lanes)-> T.
+// Edge ids: e0 = 0, chain = 1..chain, ramp, bottleneck, through.
+struct Gore { Graph g; NodeId ramp_dest, through_dest; EdgeId first_chain; };
+Gore make_gore(int chain) {
+    Gore r;
+    Graph& g = r.g;
+    const int D = 1 + chain, R = D + 1, X = D + 2, T = D + 3, N = D + 4;
+    g.nodes.resize(N);
+    for (int i = 0; i < N; ++i) g.nodes[i] = {static_cast<float>(i) * 0.003f, 0.0f, 0, 0, 0, static_cast<uint32_t>(i)};
+    g.nodes[R].lat = -0.003f; g.nodes[X].lat = -0.006f;
+    g.edges.push_back(mk(1, 300.0f, 4800.0f));                                // e0
+    for (int k = 0; k < chain; ++k) g.edges.push_back(mk(2 + k, 17.0f, 6400.0f));
+    const EdgeId ramp = g.edges.size();  g.edges.push_back(mk(R, 100.0f, 1600.0f));
+    const EdgeId bott = g.edges.size();  g.edges.push_back(mk(X, 100.0f, 60.0f));
+    const EdgeId thru = g.edges.size();  g.edges.push_back(mk(T, 200.0f, 4800.0f));
+    // CSR: node i (< D) has out-edge i; D has ramp, through; R has bottleneck
+    g.row_ptr.assign(N + 1, 0);
+    g.col_idx.clear();
+    for (int u = 0; u < N; ++u) {
+        if (u < D) g.col_idx.push_back(u);
+        else if (u == D) { g.col_idx.push_back(ramp); g.col_idx.push_back(thru); }
+        else if (u == R) g.col_idx.push_back(bott);
+        g.row_ptr[u + 1] = g.col_idx.size();
+    }
+    g.geom_ptr.assign(g.edges.size() + 1, 0);
+    r.ramp_dest = X; r.through_dest = T; r.first_chain = 1;
+    return r;
 }
 
-double worst_gore_through_dwell(bool lookahead) {
+double worst_gore_through_dwell(bool lookahead, int chain) {
     namespace fs = std::filesystem;
-    auto graph = std::make_shared<Graph>(make_gore());
+    Gore gore = make_gore(chain);
+    auto graph = std::make_shared<Graph>(gore.g);
     LtmTrafficModel::Config lc;
     lc.enable_discharge_cap = true;
     lc.discharge_burst_s    = 1.0f;
@@ -212,36 +228,39 @@ double worst_gore_through_dwell(bool lookahead) {
     sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, lc));
     sim.set_router(std::make_unique<AStarRouter>(*graph));
     auto od = fs::temp_directory_path() /
-              ("nomad_test_qnode_gore_" + std::to_string(lookahead) + ".csv");
+              ("nomad_test_qnode_gore_" + std::to_string(lookahead) + "_" + std::to_string(chain) + ".csv");
     {
         std::ofstream f(od);
         f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
-        f << "0,4,150,car,0,60\n";      // ramp agents: ids 0..149
-        f << "0,5,30,car,300,360\n";    // through agents: ids 150..179
+        f << "0," << gore.ramp_dest << ",150,car,0,60\n";      // ramp agents: ids 0..149
+        f << "0," << gore.through_dest << ",30,car,300,360\n"; // through agents: ids 150..179
     }
     sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
     std::unordered_map<AgentId, double> t_e0, t_e1;
     sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
         if (e.agent < 150) return;
         if (e.payload == 0) t_e0[e.agent] = e.time;
-        if (e.payload == 1) t_e1[e.agent] = e.time;
+        if (e.payload == gore.first_chain) t_e1[e.agent] = e.time;
     });
     sim.run();
     fs::remove(od);
-    if (t_e1.size() != 30) return 1e9;
+    if (t_e1.size() != 30) return 1e9;   // some through vehicles never left e0
     double worst = 0.0;
     for (auto& [a, t1] : t_e1) worst = std::max(worst, t1 - t_e0.at(a));
     return worst;
 }
 } // namespace
 
-TEST_CASE("QNode: with movement lookahead, a blocked ramp one link downstream does not block through traffic",
+TEST_CASE("QNode: with movement lookahead, a blocked ramp downstream does not block through traffic",
           "[traffic][qnode][integration]") {
-    const double plain = worst_gore_through_dwell(false);
-    const double look  = worst_gore_through_dwell(true);
-    INFO("worst through dwell on e0: movement FIFO=" << plain << " s, with lookahead=" << look << " s");
-    REQUIRE(look < 30.0);            // free flow on e0 is 15 s (+ node step rounding)
-    REQUIRE(plain > 100.0);          // the ramp-bound head blocks the (e0 -> e1) FIFO
+    for (int chain : {1, 3}) {
+        const double plain = worst_gore_through_dwell(false, chain);
+        const double look  = worst_gore_through_dwell(true, chain);
+        INFO("diverge " << chain << " link(s) downstream: worst through dwell on e0: movement FIFO="
+             << plain << " s, with lookahead=" << look << " s");
+        REQUIRE(look < 30.0);        // free flow on e0 is 15 s (+ node step rounding)
+        REQUIRE(plain > 100.0);      // the ramp-bound head blocks through vehicles
+    }
 }
 
 #include <nomad/config/scenario_config.hpp>

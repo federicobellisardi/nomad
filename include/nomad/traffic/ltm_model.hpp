@@ -3,6 +3,8 @@
 #include <nomad/core/graph.hpp>
 #include <nomad/traffic/traffic_model.hpp>
 
+#include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace nomad {
@@ -81,13 +83,15 @@ public:
         bool  movement_storage    = false;
 
         // Movement lookahead (opt-in, needs movement_storage). Vehicles on e
-        // are grouped by their next TWO links (lane group for the turn after
-        // next): a group (next, next_after) may hold at most
-        // storage(e) * min(1, min(lanes(next), lanes(next_after)) / lanes(e)),
-        // and the QNode FIFO holds per group. Without it, a full off-ramp that
-        // leaves a short gore link (diverge one link downstream) blocks every
-        // vehicle on e heading to that gore link, including through traffic
-        // (Palma: Ma-20 / Ma-19 queues discharging at 2-15% of capacity with
+        // are grouped into lane groups by the branch they take at the first
+        // diverge downstream along their route (first node with more than one
+        // car out-link; between e and it there is no other choice, so the
+        // path is fixed). A group may hold at most storage(e) * min(1,
+        // min lanes along the path up to and including the branch / lanes(e)),
+        // and the QNode FIFO holds per group. Without it, a full off-ramp
+        // whose diverge lies one or more links downstream (motorway chains of
+        // micro-links) blocks every vehicle on e, including through traffic
+        // (Palma: Ma-20 / Ma-19 queues discharging at 2-18% of capacity with
         // an empty mainline downstream).
         bool  movement_lookahead  = false;
 
@@ -145,6 +149,11 @@ public:
     bool    fifo_lookahead() const override {
         return cfg_.movement_storage && cfg_.movement_lookahead;
     }
+    bool    has_capacity_path(EdgeId e, std::span<const EdgeId> after) const override;
+    bool    has_capacity_departure_path(EdgeId e, std::span<const EdgeId> after) const override;
+    bool    on_exit_path(EdgeId e, std::span<const EdgeId> after, AgentId a, SimTime t) override;
+    void    assign_movement_path(EdgeId e, AgentId a, std::span<const EdgeId> after) override;
+    EdgeId  fifo_group(EdgeId e, std::span<const EdgeId> after) const override;
 
     // Exits forced through a blocked spillback gate by the stuck_time_s rule.
     uint64_t squeezed_exits() const { return n_squeezed_; }
@@ -177,6 +186,8 @@ private:
     };
 
     float travel_time_for(EdgeId e) const;
+    // Exit gates of e given whether `next` has room for the agent.
+    bool  on_exit_gate(EdgeId e, EdgeId next, bool room, AgentId a, SimTime t);
 
     const Graph&        graph_;
     Config               cfg_;
@@ -198,13 +209,16 @@ private:
     std::vector<uint32_t> mv_off_;
     std::vector<int32_t>  mv_occ_;
     std::vector<uint32_t> agent_slot_;   // per agent, kNoSlot if none
-    // Movement lookahead: counters per (e, next, next_after). For movement
-    // slot s = (e, next) the groups are the out-edges of target(next), at
-    // mv2_occ_[mv2_off_[s] + pos]; agent_slot2_ as agent_slot_.
-    uint32_t group_slot(EdgeId e, EdgeId next, EdgeId next_after) const;
-    std::vector<uint32_t> mv2_off_;
-    std::vector<int32_t>  mv2_occ_;
-    std::vector<uint32_t> agent_slot2_;
+    // Movement lookahead: lane group of a vehicle on e = branch at the first
+    // diverge along `after`, with the min lanes up to it (kInvalidEdge: no
+    // diverge before the trip ends, no group limit).
+    struct Group { EdgeId branch = kInvalidEdge; float lanes = 0.0f; };
+    Group lane_group(EdgeId e, std::span<const EdgeId> after) const;
+    bool  group_has_room(EdgeId e, const Group& g) const;
+    static uint64_t group_key(EdgeId e, EdgeId b) { return (uint64_t(e) << 32) | b; }
+    std::vector<uint8_t>  car_outdeg_;              // per node, capped at 2
+    std::unordered_map<uint64_t, int32_t> grp_occ_;
+    std::vector<uint64_t> agent_grp_;               // per agent, ~0 if none
 
     std::vector<uint8_t> is_active_;
     std::vector<EdgeId>  active_list_;
