@@ -13,14 +13,31 @@ namespace nomad {
 
 OdMatrixDemand::OdMatrixDemand(std::vector<OdEntry> entries, uint32_t seed,
                                 float time_min_s)
-    : entries_(std::move(entries)), rng_(seed), time_min_s_(time_min_s) {}
+    : entries_(std::move(entries)), rng_(seed), seed_(seed), time_min_s_(time_min_s) {}
+
+namespace {
+// Uniform [0,1) from a hash of (seed, CSV row, trip index, stream).
+double trip_uniform(uint32_t seed, uint32_t row, uint32_t i, uint64_t stream) {
+    uint64_t x = (static_cast<uint64_t>(seed) << 32) ^ (static_cast<uint64_t>(row) * 0x9E3779B97F4A7C15ull)
+                 ^ (static_cast<uint64_t>(i) * 0xC2B2AE3D27D4EB4Full) ^ (stream * 0x165667B19E3779F9ull);
+    for (int k = 0; k < 2; ++k) {   // splitmix64 finaliser, twice
+        x += 0x9E3779B97F4A7C15ull;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        x = z ^ (z >> 31);
+    }
+    return (x >> 11) * (1.0 / 9007199254740992.0);
+}
+} // namespace
 
 OdMatrixDemand OdMatrixDemand::from_csv(const std::filesystem::path& csv_path,
                                           uint32_t seed,
                                           float time_min_s,
                                           float time_max_s,
                                           const std::vector<AgentMode>& allowed_modes,
-                                          float demand_scale) {
+                                          float demand_scale,
+                                          bool nested_sampling) {
     std::ifstream f(csv_path);
     if (!f) throw std::runtime_error("Cannot open OD CSV: " + csv_path.string());
 
@@ -28,8 +45,10 @@ OdMatrixDemand OdMatrixDemand::from_csv(const std::filesystem::path& csv_path,
     std::string line;
     std::getline(f, line); // skip header
 
+    uint32_t row = 0;
     while (std::getline(f, line)) {
         if (line.empty()) continue;
+        const uint32_t this_row = row++;
         std::istringstream ss(line);
         std::string tok;
         OdEntry e{};
@@ -68,6 +87,7 @@ OdMatrixDemand OdMatrixDemand::from_csv(const std::filesystem::path& csv_path,
         e.count         = count;
         e.depart_mean_s = mean_s;
         e.depart_std_s  = std_s;
+        e.row           = this_row;
 
         e.mode = str_to_mode(mode_str);
 
@@ -83,7 +103,10 @@ OdMatrixDemand OdMatrixDemand::from_csv(const std::filesystem::path& csv_path,
     // Apply demand scaling via binomial thinning (preserves Poisson statistics).
     // Each trip in an OD pair independently survives with probability demand_scale.
     uint32_t n_agents_raw = 0;
-    if (demand_scale < 1.0f && demand_scale > 0.0f) {
+    if (nested_sampling) {
+        // counts stay full; trips are drawn per trip in generate()
+        for (const auto& en : entries) n_agents_raw += en.count;
+    } else if (demand_scale < 1.0f && demand_scale > 0.0f) {
         std::mt19937 scale_rng(seed ^ 0xDEADBEEF);
         for (auto& en : entries) {
             n_agents_raw += en.count;
@@ -104,7 +127,10 @@ OdMatrixDemand OdMatrixDemand::from_csv(const std::filesystem::path& csv_path,
         if (h >= 0 && h < 25) hour_counts[static_cast<std::size_t>(h)] += en.count;
         n_agents_loaded += en.count;
     }
-    if (demand_scale < 1.0f)
+    if (nested_sampling)
+        spdlog::info("OdMatrixDemand: nested sampling, demand_scale={:.2f} of {} trips "
+                     "(drawn per trip at generation)", demand_scale, n_agents_raw);
+    else if (demand_scale < 1.0f)
         spdlog::info("OdMatrixDemand: demand_scale={:.2f} → {} → {} agents",
                       demand_scale, n_agents_raw, n_agents_loaded);
     spdlog::info("OdMatrixDemand: loaded {} entries ({} agents) from {}",
@@ -113,7 +139,9 @@ OdMatrixDemand OdMatrixDemand::from_csv(const std::filesystem::path& csv_path,
         if (hour_counts[static_cast<std::size_t>(h)] > 0)
             spdlog::info("  {:02d}:00  {:6d} agents", h, hour_counts[static_cast<std::size_t>(h)]);
 
-    return OdMatrixDemand{std::move(entries), seed, time_min_s};
+    OdMatrixDemand dm{std::move(entries), seed, time_min_s};
+    if (nested_sampling) dm.set_nested_sampling(demand_scale);
+    return dm;
 }
 
 SimTime OdMatrixDemand::sample_departure(const OdEntry& e) {
@@ -129,16 +157,28 @@ std::size_t OdMatrixDemand::generate(const Graph& /*graph*/,
                                        EventQueue& eq,
                                        AgentColdStore& cold,
                                        RouteStore& routes) {
+    auto kept = [&](const OdEntry& en, uint32_t i) {
+        return !nested_ || trip_uniform(seed_, en.row, i, 1) < static_cast<double>(nested_scale_);
+    };
     std::size_t total = 0;
-    for (const auto& entry : entries_) total += entry.count;
+    for (const auto& entry : entries_)
+        for (uint32_t i = 0; i < entry.count; ++i) total += kept(entry, i) ? 1 : 0;
 
     cold.resize(total);
     routes.resize(total);
 
     AgentId aid = 0;
     for (const auto& entry : entries_) {
-        for (uint32_t i = 0; i < entry.count; ++i, ++aid) {
-            SimTime depart = sample_departure(entry);
+        for (uint32_t i = 0; i < entry.count; ++i) {
+            if (!kept(entry, i)) continue;
+            SimTime depart;
+            if (nested_) {
+                const double start = std::max(entry.depart_mean_s, time_min_s_);
+                const double end   = std::max(static_cast<double>(entry.depart_std_s), start);
+                depart = start + trip_uniform(seed_, entry.row, i, 2) * (end - start);
+            } else {
+                depart = sample_departure(entry);
+            }
 
             // Create single activity: origin → destination
             ActivityPlan plan;
@@ -154,6 +194,7 @@ std::size_t OdMatrixDemand::generate(const Graph& /*graph*/,
             ev.type    = EventType::AgentDepart;
             ev.payload = static_cast<uint32_t>(entry.origin_node);
             eq.push(ev);
+            ++aid;
         }
     }
 

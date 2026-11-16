@@ -75,7 +75,7 @@ void write_plans(const fs::path& p, const std::vector<Plan>& plans, uint32_t num
 struct RunOut { std::size_t kept = 0, rerouted = 0, mismatch = 0; std::vector<Plan> plans; };
 
 RunOut run(const std::string& tag, const fs::path& routes_in, float fraction, uint32_t seed,
-           int count = 200) {
+           int count = 200, float nested_scale = 0.0f) {
     auto graph = std::make_shared<Graph>(make_two_routes());
     SimulationConfig cfg;
     cfg.start_time = 0.0; cfg.end_time = 600.0; cfg.sync_window_s = 5.0f;
@@ -89,9 +89,14 @@ RunOut run(const std::string& tag, const fs::path& routes_in, float fraction, ui
     {
         std::ofstream f(od);
         f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
-        f << "0,3," << count << ",car,100,30\n";
+        // nested sampling draws departures in [start, end): give it a real window
+        f << "0,3," << count << ",car,100," << (nested_scale > 0.0f ? 400 : 30) << "\n";
     }
-    sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
+    if (nested_scale > 0.0f)
+        sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(
+            od, 42, -1e9f, 1e9f, {}, nested_scale, true)));
+    else
+        sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
     auto out = fs::temp_directory_path() / ("nomad_test_replan_routes_" + tag + ".bin");
     sim.set_routes_out(out);
     if (!routes_in.empty()) sim.set_replanning(routes_in, fraction, seed);
@@ -187,4 +192,22 @@ TEST_CASE("Replanning: options are read from the scenario and validated", "[rout
     cfg.demand.source = "none";
     REQUIRE(ScenarioConfigIO::validate(cfg).find("replan_fraction") != std::string::npos);
     fs::remove(p);
+}
+
+TEST_CASE("Replanning: with nested sampling, plans learnt at a lower scale are reused by trip",
+          "[routing][replan][nested]") {
+    // iteration at scale 0.5, every plan switched to the long path
+    auto it0 = run("nested_it0", {}, 1.0f, 0, 400, 0.5f);
+    for (auto& pl : it0.plans) { REQUIRE(pl.edges == kShort); pl.edges = kLong; }
+    auto p = fs::temp_directory_path() / "nomad_test_replan_long_nested.bin";
+    write_plans(p, it0.plans, 4);
+    // scale 1.0, keep every matched plan
+    auto r = run("nested_it1", p, 0.0f, 1, 400, 1.0f);
+    fs::remove(p);
+    INFO("scale 0.5 agents " << it0.plans.size() << ", scale 1.0 agents " << r.plans.size()
+         << ": kept " << r.kept << " mismatch " << r.mismatch);
+    REQUIRE(r.plans.size() == 400);
+    REQUIRE(r.kept == it0.plans.size());              // every 0.5 trip found its plan
+    REQUIRE(r.mismatch == 400 - it0.plans.size());     // the new trips are routed afresh
+    REQUIRE(long_agents(r).size() == it0.plans.size());
 }

@@ -108,6 +108,7 @@ struct DemandConfig {
     // Use to calibrate against observed traffic counts or correct for modal-share
     // uncertainty in raw mobility data (e.g. MITMA).
     float demand_scale = 1.0f;
+    bool  nested_sampling = false;   // see OdMatrixDemand::set_nested_sampling
 };
 
 struct ModeChoiceConfig {

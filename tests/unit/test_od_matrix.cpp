@@ -13,6 +13,7 @@
 #include <nomad/demand/od_matrix.hpp>
 #include <nomad/demand/departure_sampler.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -167,4 +168,50 @@ TEST_CASE("OD CSV format: std_s == mean_s + 3600 for MITMA hour buckets", "[od][
         REQUIRE_THAT(std_s - mean_s, Catch::Matchers::WithinAbs(3600.0f, 1.0f));
     }
     fs::remove_all(tmp);
+}
+
+// ── Nested sampling ──────────────────────────────────────────────────────────
+#include <nomad/core/agent.hpp>
+#include <nomad/core/event.hpp>
+#include <nomad/core/graph.hpp>
+#include <set>
+#include <tuple>
+
+namespace {
+using Trip = std::tuple<uint32_t, uint32_t, double>;   // origin, dest, departure
+std::multiset<Trip> nested_trips(float scale, uint32_t seed = 42) {
+    namespace fs = std::filesystem;
+    auto p = fs::temp_directory_path() / "nomad_test_nested_od.csv";
+    {
+        std::ofstream f(p);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        f << "0,1,1000,car,25200,28800\n";
+        f << "2,3,1000,car,28800,32400\n";
+    }
+    auto dm = OdMatrixDemand::from_csv(p, seed, 0.0f, 86400.0f, {}, scale, true);
+    Graph g; EventQueue eq; AgentColdStore cold; RouteStore routes;
+    const std::size_t n = dm.generate(g, eq, cold, routes);
+    std::multiset<Trip> out;
+    for (std::size_t a = 0; a < n; ++a)
+        out.emplace(cold.plans[a].activities[0].location, cold.plans[a].activities[1].location,
+                    cold.plans[a].activities[0].start_time);
+    fs::remove(p);
+    return out;
+}
+} // namespace
+
+TEST_CASE("OD nested sampling: lower scales are subsets with identical departures", "[od][nested]") {
+    const auto t05 = nested_trips(0.5f), t07 = nested_trips(0.7f), t10 = nested_trips(1.0f);
+    REQUIRE(t10.size() == 2000);
+    // binomial(2000, p): +-5 sigma
+    REQUIRE(t05.size() > 1000 - 115); REQUIRE(t05.size() < 1000 + 115);
+    REQUIRE(t07.size() > 1400 - 105); REQUIRE(t07.size() < 1400 + 105);
+    REQUIRE(std::includes(t07.begin(), t07.end(), t05.begin(), t05.end()));
+    REQUIRE(std::includes(t10.begin(), t10.end(), t07.begin(), t07.end()));
+    for (const auto& [o, d, t] : t10) {
+        if (o == 0) { REQUIRE(t >= 25200.0); REQUIRE(t < 28800.0); }
+        else        { REQUIRE(t >= 28800.0); REQUIRE(t < 32400.0); }
+    }
+    REQUIRE(nested_trips(0.7f) == t07);            // reproducible
+    REQUIRE(nested_trips(0.7f, 7) != t07);         // depends on the seed
 }

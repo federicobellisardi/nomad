@@ -145,6 +145,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         const auto& d = j["demand"];
         cfg.demand.source       = d.value("source",       cfg.demand.source);
         cfg.demand.demand_scale = d.value("demand_scale", cfg.demand.demand_scale);
+        cfg.demand.nested_sampling = d.value("nested_sampling", cfg.demand.nested_sampling);
         if (d.contains("od_csv"))
             cfg.demand.od_csv = d["od_csv"].get<std::string>();
         if (d.contains("person_trips_csv"))

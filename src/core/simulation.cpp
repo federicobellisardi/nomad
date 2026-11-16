@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -217,21 +218,49 @@ void Simulation::inject_demand() {
     // ── Partial replanning: keep the stored plans of agents not drawn ─────────
     std::vector<StoredPlan> stored;
     std::vector<uint8_t>    keep;
+    std::vector<uint32_t>   plan_of;   // agent -> index in `stored`
     n_plan_kept_ = n_plan_rerouted_ = n_plan_mismatch_ = 0;
     if (!routes_in_.empty()) {
         stored = read_routes(routes_in_, graph_->num_edges());
         keep.assign(n, 0);
+        plan_of.assign(n, 0);
+        // Plans are matched by trip (origin, destination, departure, mode):
+        // the same agent index first, otherwise any stored plan of the same
+        // trip (nested demand sampling: agent indices differ across scales).
+        auto trip_key = [](uint32_t o, uint32_t d, double t, uint32_t m) {
+            uint64_t tb; std::memcpy(&tb, &t, sizeof tb);
+            uint64_t x = (static_cast<uint64_t>(o) << 32 | d) ^ (tb * 0x9E3779B97F4A7C15ull) ^ (static_cast<uint64_t>(m) << 61);
+            return splitmix64(x);
+        };
+        std::unordered_map<uint64_t, uint32_t> by_trip;
+        by_trip.reserve(stored.size());
+        for (uint32_t j = 0; j < stored.size(); ++j)
+            by_trip.emplace(trip_key(stored[j].origin, stored[j].dest, stored[j].depart, stored[j].mode), j);
+        auto same_trip = [&](const StoredPlan& sp, const ActivityPlan& plan) {
+            return sp.origin == plan.activities[0].location
+                && sp.dest   == plan.activities[1].location
+                && std::abs(sp.depart - plan.activities[0].start_time) < 1e-6
+                && sp.mode   == static_cast<uint32_t>(plan.preferred_mode);
+        };
         for (AgentId a = 0; a < static_cast<AgentId>(n); ++a) {
             const auto& plan = cold_.plans[a];
             if (plan.activities.size() < 2) continue;
-            const bool match = a < stored.size()
-                && stored[a].origin == plan.activities[0].location
-                && stored[a].dest   == plan.activities[1].location
-                && std::abs(stored[a].depart - plan.activities[0].start_time) < 1e-6
-                && stored[a].mode   == static_cast<uint32_t>(plan.preferred_mode)
-                && route_connects(*graph_, stored[a].origin, stored[a].dest, stored[a].edges);
-            if (!match) { ++n_plan_mismatch_; continue; }
-            uint64_t st = (static_cast<uint64_t>(replan_seed_) << 32) ^ a ^ 0x5EED9A7A11ull;
+            int64_t j = -1;
+            if (a < stored.size() && same_trip(stored[a], plan)) j = a;
+            else {
+                auto it = by_trip.find(trip_key(plan.activities[0].location, plan.activities[1].location,
+                                                plan.activities[0].start_time,
+                                                static_cast<uint32_t>(plan.preferred_mode)));
+                if (it != by_trip.end() && same_trip(stored[it->second], plan)) j = it->second;
+            }
+            if (j < 0 || !route_connects(*graph_, stored[j].origin, stored[j].dest, stored[j].edges)) {
+                ++n_plan_mismatch_; continue;
+            }
+            plan_of[a] = static_cast<uint32_t>(j);
+            // replanning draw keyed by trip, so it does not depend on agent indices
+            uint64_t st = (static_cast<uint64_t>(replan_seed_) << 32)
+                          ^ trip_key(stored[j].origin, stored[j].dest, stored[j].depart, stored[j].mode)
+                          ^ 0x5EED9A7A11ull;
             const double u = (splitmix64(st) >> 11) * (1.0 / 9007199254740992.0);
             if (u >= replan_fraction_) { keep[a] = 1; ++n_plan_kept_; }
             else ++n_plan_rerouted_;
@@ -240,7 +269,7 @@ void Simulation::inject_demand() {
                      "{} without a matching stored plan (re-routed)",
                      replan_fraction_, replan_seed_, n_plan_kept_, n_plan_rerouted_, n_plan_mismatch_);
         if (n_plan_mismatch_ > n / 100)
-            spdlog::warn("  {} agents did not match their stored plan: is the demand "
+            spdlog::warn("  {} agents did not match a stored plan: is the demand "
                          "(seed, scale, OD file) identical to the previous iteration?",
                          n_plan_mismatch_);
     }
@@ -255,7 +284,7 @@ void Simulation::inject_demand() {
                     const auto& plan = cold_.plans[a];
                     if (plan.activities.size() < 2) continue;
                     if (!keep.empty() && keep[a]) {
-                        route_results[a].edges    = std::move(stored[a].edges);
+                        route_results[a].edges    = stored[plan_of[a]].edges;
                         route_results[a].is_valid = true;
                         continue;
                     }

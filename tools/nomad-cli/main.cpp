@@ -211,7 +211,7 @@ static int run_scenario(ScenarioConfig cfg) {
         sim.set_demand(std::make_shared<OdMatrixDemand>(
             OdMatrixDemand::from_csv(*cfg.demand.od_csv, cfg.simulation.seed,
                 cfg.simulation.start_time, cfg.simulation.end_time,
-                allowed_modes, cfg.demand.demand_scale)));
+                allowed_modes, cfg.demand.demand_scale, cfg.demand.nested_sampling)));
     } else if (cfg.demand.source == "gravity") {
         GravityDemand::Config gc;
         gc.total_agents = cfg.demand.synthetic.total_agents;

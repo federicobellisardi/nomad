@@ -36,6 +36,7 @@ public:
         AgentMode mode;
         float     depart_mean_s;
         float     depart_std_s;
+        uint32_t  row = 0;        // CSV data row (stable trip identity for nested sampling)
     };
 
     // Node-based construction (no zone lookup needed).
@@ -52,7 +53,18 @@ public:
                                     float time_min_s = -1e9f,
                                     float time_max_s =  1e9f,
                                     const std::vector<AgentMode>& allowed_modes = {},
-                                    float demand_scale = 1.0f);
+                                    float demand_scale = 1.0f,
+                                    bool nested_sampling = false);
+
+    // Nested sampling (opt-in). Trip i of CSV row r is kept iff
+    // U(seed, r, i) < scale and departs at window_start + U'(seed, r, i) x
+    // window length, both from a hash of (seed, r, i), not from a sequential
+    // RNG. The trips kept at a lower scale are then a subset of those kept at
+    // a higher one, with identical departure times, so route plans learnt at
+    // scale 0.7 can be reused at 1.0 (partial replanning matches plans by
+    // trip). With scale 1 it keeps every trip but its departures differ from
+    // the sequential sampler.
+    void set_nested_sampling(float scale) { nested_ = true; nested_scale_ = scale; }
 
     std::size_t generate(const Graph&, EventQueue&,
                           AgentColdStore&, RouteStore&) override;
@@ -64,6 +76,9 @@ private:
 
     std::vector<OdEntry> entries_;
     std::mt19937         rng_;
+    uint32_t             seed_{42};
+    bool                 nested_{false};
+    float                nested_scale_{1.0f};
     float                time_min_s_{-1e9f};  // lower bound for departure clamp
 };
 
