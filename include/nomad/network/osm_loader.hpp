@@ -46,6 +46,14 @@ struct OsmTagConfig {
     // Default signal timing used when OSM lacks explicit timing data
     SignalDefaults signal_defaults;
 
+    // Green fraction for mid-block signals (opt-in, <= 0 = off): a signal
+    // tagged as a pedestrian crossing, or on a node with at most two car
+    // neighbours (no crossing road), gets this green share instead of
+    // signal_defaults.green_frac. A pedestrian signal rests in green for cars
+    // and gives a short call-based phase; the intersection default (0.45)
+    // under-states its capacity (Palma: 273 of 374 signals are mid-block).
+    float midblock_signal_green_frac = -1.0f;
+
     static OsmTagConfig load_yaml(const std::filesystem::path& yaml_path);
     static OsmTagConfig defaults();  // built-in defaults for immediate use
 };

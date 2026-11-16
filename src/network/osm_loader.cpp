@@ -77,6 +77,19 @@ OsmTagConfig OsmTagConfig::load_yaml(const std::filesystem::path& yaml_path) {
             cfg.signal_defaults.green_frac = root["signal_green_frac"].as<float>();
         if (root["capacity_from_total_lanes"])
             cfg.capacity_from_total_lanes = root["capacity_from_total_lanes"].as<bool>();
+        if (root["midblock_signal_green_frac"])
+            cfg.midblock_signal_green_frac = root["midblock_signal_green_frac"].as<float>();
+        // Per-lane capacity overrides by highway= value (veh/h/lane).
+        if (root["capacity_per_lane_veh_h"]) {
+            for (const auto& kv : root["capacity_per_lane_veh_h"]) {
+                const auto key = kv.first.as<std::string>();
+                auto it = cfg.highway_map.find(key);
+                if (it == cfg.highway_map.end())
+                    spdlog::warn("OsmTagConfig: capacity_per_lane_veh_h: unknown highway '{}'", key);
+                else
+                    it->second.capacity_per_lane_veh_h = kv.second.as<float>();
+            }
+        }
         // Additional tag overrides loaded here as the config file grows
     } catch (const std::exception& ex) {
         spdlog::warn("OsmTagConfig::load_yaml: {} — using defaults", ex.what());
@@ -398,6 +411,11 @@ struct NomadNodeHandler : osmium::handler::Handler {
                                           ? "traffic_signals:direction" : "direction"];
         if (dir && std::string(dir) == "forward")  meta.direction = 1;
         if (dir && std::string(dir) == "backward") meta.direction = -1;
+        if (type == IntersectionType::TrafficSignal) {
+            const char* ts = node.tags()["traffic_signals"];
+            meta.ped_crossing = node.tags()["crossing"] != nullptr ||
+                                (ts && std::string(ts) == "crossing");
+        }
 
         if (type == IntersectionType::TrafficSignal) {
             SignalPhase phase;
@@ -486,6 +504,34 @@ Graph OsmLoader::build_graph(
         nodes[lid].intersection_type = static_cast<uint8_t>(IntersectionType::Simple);
         nodes[lid].signal_phase_idx  = 0;
         nodes[lid].osm_node_idx      = lid; // placeholder
+    }
+
+    // Mid-block signals (opt-in): pedestrian-crossing tag, or a node with at
+    // most two car neighbours (the road passes through, nothing crosses it).
+    if (cfg_.midblock_signal_green_frac > 0.0f) {
+        std::unordered_map<OsmNodeId, std::vector<OsmNodeId>> car_nb;
+        for (const auto& e : raw_edges) {
+            if (e.road_class > static_cast<uint8_t>(RoadClass::Unclassified)) continue;
+            car_nb[e.from_node].push_back(e.to_node);
+            car_nb[e.to_node].push_back(e.from_node);
+        }
+        std::size_t n_sig = 0, n_mid = 0, n_tag = 0;
+        for (auto& [osm_id, meta] : intersections_) {
+            if (meta.type != IntersectionType::TrafficSignal || meta.phases.empty()) continue;
+            ++n_sig;
+            std::size_t nb = 0;
+            if (auto it = car_nb.find(osm_id); it != car_nb.end()) {
+                auto v = it->second;
+                std::sort(v.begin(), v.end());
+                nb = static_cast<std::size_t>(std::unique(v.begin(), v.end()) - v.begin());
+            }
+            if (meta.ped_crossing || nb <= 2) {
+                ++n_mid; if (meta.ped_crossing) ++n_tag;
+                meta.phases[0].green_s = meta.phases[0].cycle_s * cfg_.midblock_signal_green_frac;
+            }
+        }
+        spdlog::info("Mid-block signals: {} of {} signals ({} tagged as crossings) get green fraction {:.2f}",
+                     n_mid, n_sig, n_tag, cfg_.midblock_signal_green_frac);
     }
 
     // Apply intersection metadata

@@ -39,6 +39,9 @@ struct IntersectionMeta {
     // Approach the control applies to, relative to the OSM way's node order
     // (traffic_signals:direction / direction): +1 forward, -1 backward, 0 all.
     int8_t                direction = 0;
+    // Signal tagged as a pedestrian crossing (crossing=* or
+    // traffic_signals=crossing on the node).
+    bool                  ped_crossing = false;
 };
 
 // ── Capacity derate factors (from HCM / TCQSM) ────────────────────────────────
