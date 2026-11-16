@@ -180,6 +180,70 @@ TEST_CASE("QNode: with movement storage, FIFO holds per movement", "[traffic][qn
     REQUIRE(per_link > 100.0);       // plain FIFO: the ramp queue blocks through cars
 }
 
+namespace {
+// Diverge one link downstream (MATSim-style gore micro-link):
+// 0 -e0 (3 lanes, 300 m)-> 1 -e1 (17 m, 4 lanes)-> 2;
+// 2 -e2 (1-lane ramp)-> 3 -e3 (60 veh/h bottleneck)-> 4;  2 -e4 (3-lane through)-> 5.
+Graph make_gore() {
+    Graph g;
+    g.nodes.resize(6);
+    for (int i = 0; i < 6; ++i) g.nodes[i] = {static_cast<float>(i) * 0.003f, 0.0f, 0, 0, 0, static_cast<uint32_t>(i)};
+    g.nodes[3].lat = -0.003f; g.nodes[4].lat = -0.006f;
+    g.row_ptr = {0, 1, 2, 4, 5, 5, 5};
+    g.col_idx = {0, 1, 2, 4, 3};
+    g.edges = {mk(1, 300.0f, 4800.0f), mk(2, 17.0f, 6400.0f), mk(3, 100.0f, 1600.0f),
+               mk(4, 100.0f, 60.0f), mk(5, 200.0f, 4800.0f)};
+    g.geom_ptr.assign(6, 0);
+    return g;
+}
+
+double worst_gore_through_dwell(bool lookahead) {
+    namespace fs = std::filesystem;
+    auto graph = std::make_shared<Graph>(make_gore());
+    LtmTrafficModel::Config lc;
+    lc.enable_discharge_cap = true;
+    lc.discharge_burst_s    = 1.0f;
+    lc.movement_storage     = true;
+    lc.movement_lookahead   = lookahead;
+    auto cfg = base_cfg("qnode");
+    cfg.end_time = 1800.0;
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph, lc));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+    auto od = fs::temp_directory_path() /
+              ("nomad_test_qnode_gore_" + std::to_string(lookahead) + ".csv");
+    {
+        std::ofstream f(od);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        f << "0,4,150,car,0,60\n";      // ramp agents: ids 0..149
+        f << "0,5,30,car,300,360\n";    // through agents: ids 150..179
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
+    std::unordered_map<AgentId, double> t_e0, t_e1;
+    sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
+        if (e.agent < 150) return;
+        if (e.payload == 0) t_e0[e.agent] = e.time;
+        if (e.payload == 1) t_e1[e.agent] = e.time;
+    });
+    sim.run();
+    fs::remove(od);
+    if (t_e1.size() != 30) return 1e9;
+    double worst = 0.0;
+    for (auto& [a, t1] : t_e1) worst = std::max(worst, t1 - t_e0.at(a));
+    return worst;
+}
+} // namespace
+
+TEST_CASE("QNode: with movement lookahead, a blocked ramp one link downstream does not block through traffic",
+          "[traffic][qnode][integration]") {
+    const double plain = worst_gore_through_dwell(false);
+    const double look  = worst_gore_through_dwell(true);
+    INFO("worst through dwell on e0: movement FIFO=" << plain << " s, with lookahead=" << look << " s");
+    REQUIRE(look < 30.0);            // free flow on e0 is 15 s (+ node step rounding)
+    REQUIRE(plain > 100.0);          // the ramp-bound head blocks the (e0 -> e1) FIFO
+}
+
 #include <nomad/config/scenario_config.hpp>
 
 TEST_CASE("QNode: node_model is read from the scenario and validated", "[traffic][qnode][config]") {

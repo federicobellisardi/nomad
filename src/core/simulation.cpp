@@ -410,7 +410,8 @@ void Simulation::handle_depart(const Event& e) {
         // which normally does both, is bypassed for this transition).
         if (traffic_ && hot_.mode[a] == AgentMode::Car &&
             !traffic_->has_capacity_departure(pre_edges[0],
-                                        pre_edges.size() > 1 ? pre_edges[1] : kInvalidEdge)) {
+                                        pre_edges.size() > 1 ? pre_edges[1] : kInvalidEdge,
+                                        pre_edges.size() > 2 ? pre_edges[2] : kInvalidEdge)) {
             ++n_depart_rejected_;
             eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
             return;
@@ -440,7 +441,8 @@ void Simulation::handle_depart(const Event& e) {
 
     if (traffic_ && hot_.mode[a] == AgentMode::Car &&
         !traffic_->has_capacity_departure(route.edges[0],
-                                    route.edges.size() > 1 ? route.edges[1] : kInvalidEdge)) {
+                                    route.edges.size() > 1 ? route.edges[1] : kInvalidEdge,
+                                    route.edges.size() > 2 ? route.edges[2] : kInvalidEdge)) {
         ++n_depart_rejected_;
         eq_.push({e.time + 1.0, a, e.payload, EventType::AgentDepart, {}});
         return;
@@ -453,10 +455,10 @@ void Simulation::handle_depart(const Event& e) {
     fire_hooks(EventType::AgentEnterLink, {e.time, a, route.edges[0], EventType::AgentEnterLink, {}});
 }
 
-EdgeId Simulation::next_edge_after_current(AgentId a) const {
+EdgeId Simulation::next_edge_after_current(AgentId a, std::size_t ahead) const {
     if (a >= routes_.routes.size()) return kInvalidEdge;
     const auto& r = routes_.routes[a];
-    std::size_t k = static_cast<std::size_t>(hot_.route_pos[a]) + 1;
+    std::size_t k = static_cast<std::size_t>(hot_.route_pos[a]) + ahead;
     return k < r.size() ? r[k] : kInvalidEdge;
 }
 
@@ -479,7 +481,7 @@ void Simulation::enter_edge_now(AgentId a, EdgeId eid, SimTime t) {
             qlast_exit_[eid] = exit_time;
         }
         traffic_->record_enter(eid, t);
-        traffic_->assign_movement(eid, a, next_edge_after_current(a));
+        traffic_->assign_movement(eid, a, next_edge_after_current(a), next_edge_after_current(a, 2));
     } else {
         exit_time = t + graph_->mode_free_flow_time(
             eid, hot_.mode[a], cfg_.walk_speed_ms, cfg_.bike_speed_ms);
@@ -513,10 +515,11 @@ void Simulation::handle_exit_link(const Event& e) {
     auto     route = routes_.get_route(a);
     EdgeId   next  = (pos < route.size()) ? route[pos] : kInvalidEdge;
     EdgeId   next_after = (pos + 1u < route.size()) ? route[pos + 1u] : kInvalidEdge;
+    EdgeId   next_after2 = (pos + 2u < route.size()) ? route[pos + 2u] : kInvalidEdge;
 
     bool can_exit = true;
     if (traffic_ && hot_.mode[a] == AgentMode::Car)
-        can_exit = traffic_->on_exit_to(eid, next, next_after, a, e.time);
+        can_exit = traffic_->on_exit_to(eid, next, next_after, a, e.time, next_after2);
 
     if (!can_exit) {
         eq_.push({e.time + 1.0, a, eid, EventType::AgentExitLink, {}});
@@ -621,6 +624,7 @@ void Simulation::handle_node_step(const Event& e) {
     uint64_t st = (static_cast<uint64_t>(cfg_.seed) << 32) ^ (static_cast<uint64_t>(n) * 0x9E3779B1ull)
                   ^ (static_cast<uint64_t>(t) * 0xC2B2AE3D27D4EB4Full);
     const bool per_mv = traffic_ && traffic_->fifo_per_movement();
+    const bool look   = per_mv && traffic_->fifo_lookahead();
     bool remaining = false;
 
     while (!act.empty()) {
@@ -638,7 +642,9 @@ void Simulation::handle_node_step(const Event& e) {
         act.pop_back();
 
         auto& buf = qbuf_[ein];
-        std::vector<EdgeId> blocked_mv;   // per-movement FIFO: movements blocked this step
+        // per-movement FIFO: movements (next, and next_after with lookahead)
+        // blocked this step
+        std::vector<std::pair<EdgeId, EdgeId>> blocked_mv;
         for (std::size_t i = 0; i < buf.size();) {
             const AgentId a = buf[i];
             // teleported or otherwise gone from this link: drop the stale entry
@@ -650,10 +656,12 @@ void Simulation::handle_node_step(const Event& e) {
             auto route = routes_.get_route(a);
             const EdgeId next = (pos < route.size()) ? route[pos] : kInvalidEdge;
             const EdgeId next_after = (pos + 1u < route.size()) ? route[pos + 1u] : kInvalidEdge;
-            if (per_mv && std::find(blocked_mv.begin(), blocked_mv.end(), next) != blocked_mv.end()) {
+            const EdgeId next_after2 = (pos + 2u < route.size()) ? route[pos + 2u] : kInvalidEdge;
+            const std::pair<EdgeId, EdgeId> mv{next, look ? next_after : kInvalidEdge};
+            if (per_mv && std::find(blocked_mv.begin(), blocked_mv.end(), mv) != blocked_mv.end()) {
                 ++i; continue;
             }
-            if (traffic_->on_exit_to(ein, next, next_after, a, t)) {
+            if (traffic_->on_exit_to(ein, next, next_after, a, t, next_after2)) {
                 buf.erase(buf.begin() + static_cast<std::ptrdiff_t>(i));
                 complete_exit(a, ein, next, t);
                 continue;
@@ -661,8 +669,9 @@ void Simulation::handle_node_step(const Event& e) {
             // Not admitted. Plain FIFO: the whole link waits. Per movement:
             // only this movement waits, unless the block is on the link's own
             // discharge (downstream has room), which stops the link.
-            if (!per_mv || next == kInvalidEdge || traffic_->has_capacity_for(next, next_after)) break;
-            blocked_mv.push_back(next);
+            if (!per_mv || next == kInvalidEdge ||
+                traffic_->has_capacity_for(next, next_after, next_after2)) break;
+            blocked_mv.push_back(mv);
             ++i;
         }
         if (!buf.empty()) remaining = true;
@@ -706,7 +715,8 @@ void Simulation::handle_reroute(const Event& e) {
         // at that edge's target, so it replaces everything AFTER it.
         routes_.replace_suffix(a, static_cast<uint16_t>(hot_.route_pos[a] + 1), r.edges);
         if (traffic_ && hot_.mode[a] == AgentMode::Car && hot_.state[a] == AgentState::OnLink)
-            traffic_->assign_movement(hot_.current_edge[a], a, next_edge_after_current(a));
+            traffic_->assign_movement(hot_.current_edge[a], a, next_edge_after_current(a),
+                                      next_edge_after_current(a, 2));
         // Keep freeflow_route_s in sync with the rerouted path so the stuck
         // threshold (ratio × ff) is never exceeded by BPR-congested agents on
         // a longer but legitimate detour.
@@ -921,7 +931,8 @@ std::size_t Simulation::apply_reroute_batch(const std::vector<AgentId>& agents,
         routes_.replace_suffix(a, from_pos, new_routes[i].edges);
         if (counts_toward_budget && traffic_ && hot_.mode[a] == AgentMode::Car &&
             hot_.state[a] == AgentState::OnLink)
-            traffic_->assign_movement(hot_.current_edge[a], a, next_edge_after_current(a));
+            traffic_->assign_movement(hot_.current_edge[a], a, next_edge_after_current(a),
+                                      next_edge_after_current(a, 2));
         // Keep freeflow_route_s in sync with the (re)routed path so the
         // stuck-agent teleport threshold (ratio × freeflow_route_s) is never
         // exceeded by a longer but legitimate detour.

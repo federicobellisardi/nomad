@@ -128,6 +128,8 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
                                                       cfg.traffic.ltm_discharge_burst_s);
         cfg.traffic.ltm_movement_storage  = t.value("ltm_movement_storage",
                                                       cfg.traffic.ltm_movement_storage);
+        cfg.traffic.ltm_movement_lookahead = t.value("ltm_movement_lookahead",
+                                                       cfg.traffic.ltm_movement_lookahead);
         cfg.traffic.ltm_stuck_time_s      = t.value("ltm_stuck_time_s",
                                                       cfg.traffic.ltm_stuck_time_s);
         cfg.traffic.ltm_squeeze_per_receiver = t.value("ltm_squeeze_per_receiver",
@@ -274,6 +276,7 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["traffic"]["ltm_discharge_cap"]        = cfg.traffic.ltm_discharge_cap;
     j["traffic"]["ltm_discharge_burst_s"]    = cfg.traffic.ltm_discharge_burst_s;
     j["traffic"]["ltm_movement_storage"]     = cfg.traffic.ltm_movement_storage;
+    j["traffic"]["ltm_movement_lookahead"]   = cfg.traffic.ltm_movement_lookahead;
     j["traffic"]["ltm_stuck_time_s"]         = cfg.traffic.ltm_stuck_time_s;
     j["traffic"]["ltm_squeeze_per_receiver"] = cfg.traffic.ltm_squeeze_per_receiver;
     j["traffic"]["ltm_priority_reserve_veh"] = cfg.traffic.ltm_priority_reserve_veh;

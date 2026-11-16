@@ -80,6 +80,17 @@ public:
         // Ma-20 in the Palma evening runs. Total storage still applies.
         bool  movement_storage    = false;
 
+        // Movement lookahead (opt-in, needs movement_storage). Vehicles on e
+        // are grouped by their next TWO links (lane group for the turn after
+        // next): a group (next, next_after) may hold at most
+        // storage(e) * min(1, min(lanes(next), lanes(next_after)) / lanes(e)),
+        // and the QNode FIFO holds per group. Without it, a full off-ramp that
+        // leaves a short gore link (diverge one link downstream) blocks every
+        // vehicle on e heading to that gore link, including through traffic
+        // (Palma: Ma-20 / Ma-19 queues discharging at 2-15% of capacity with
+        // an empty mainline downstream).
+        bool  movement_lookahead  = false;
+
         // Gridlock resolution (opt-in, 0 = off). When the exit of link e has
         // been continuously blocked by downstream spillback for at least
         // stuck_time_s, the head vehicle enters the next link anyway, over its
@@ -118,15 +129,22 @@ public:
     std::span<const LinkState> link_states()  const                   override;
     std::string_view model_name()            const  override { return "ltm"; }
     bool    has_capacity(EdgeId e) const                              override;
-    bool    has_capacity_departure(EdgeId e, EdgeId next) const       override;
+    bool    has_capacity_departure(EdgeId e, EdgeId next,
+                                   EdgeId next_after = kInvalidEdge) const override;
     // True if `e` is the major approach of `next` (always true when the
     // priority rule is off).
     bool    is_major(EdgeId e, EdgeId next) const;
-    bool    has_capacity_for(EdgeId e, EdgeId next) const               override;
+    bool    has_capacity_for(EdgeId e, EdgeId next,
+                             EdgeId next_after = kInvalidEdge) const      override;
     bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
-                         AgentId a, SimTime t)                            override;
-    void    assign_movement(EdgeId e, AgentId a, EdgeId next)            override;
+                         AgentId a, SimTime t,
+                         EdgeId next_after2 = kInvalidEdge)               override;
+    void    assign_movement(EdgeId e, AgentId a, EdgeId next,
+                            EdgeId next_after = kInvalidEdge)             override;
     bool    fifo_per_movement() const override { return cfg_.movement_storage; }
+    bool    fifo_lookahead() const override {
+        return cfg_.movement_storage && cfg_.movement_lookahead;
+    }
 
     // Exits forced through a blocked spillback gate by the stuck_time_s rule.
     uint64_t squeezed_exits() const { return n_squeezed_; }
@@ -180,6 +198,13 @@ private:
     std::vector<uint32_t> mv_off_;
     std::vector<int32_t>  mv_occ_;
     std::vector<uint32_t> agent_slot_;   // per agent, kNoSlot if none
+    // Movement lookahead: counters per (e, next, next_after). For movement
+    // slot s = (e, next) the groups are the out-edges of target(next), at
+    // mv2_occ_[mv2_off_[s] + pos]; agent_slot2_ as agent_slot_.
+    uint32_t group_slot(EdgeId e, EdgeId next, EdgeId next_after) const;
+    std::vector<uint32_t> mv2_off_;
+    std::vector<int32_t>  mv2_occ_;
+    std::vector<uint32_t> agent_slot2_;
 
     std::vector<uint8_t> is_active_;
     std::vector<EdgeId>  active_list_;

@@ -137,29 +137,38 @@ public:
     // `next` is the edge the agent will take AFTER e (kInvalidEdge if e is
     // its last edge). Models with per-movement storage (LTM with
     // movement_storage) use it; the others ignore it.
-    virtual bool has_capacity_for(EdgeId e, EdgeId next) const {
-        (void)next; return has_capacity(e);
+    // `next_after` (optional) is the edge after `next`: models with movement
+    // lookahead also limit the vehicles on e heading to (next, next_after).
+    virtual bool has_capacity_for(EdgeId e, EdgeId next, EdgeId next_after = kInvalidEdge) const {
+        (void)next; (void)next_after; return has_capacity(e);
     }
     // Admission of a departing vehicle onto its first edge e (next = second
-    // edge). Models with node priority treat departures as minor entries.
-    virtual bool has_capacity_departure(EdgeId e, EdgeId next) const {
-        return has_capacity_for(e, next);
+    // edge, next_after = third). Models with node priority treat departures
+    // as minor entries.
+    virtual bool has_capacity_departure(EdgeId e, EdgeId next, EdgeId next_after = kInvalidEdge) const {
+        return has_capacity_for(e, next, next_after);
     }
-    // Exit from e into `next`, where `next_after` is the edge the agent will
-    // take after `next` (used for the spillback check on `next`).
-    virtual bool on_exit_to(EdgeId e, EdgeId next, EdgeId next_after, AgentId a, SimTime t) {
-        (void)next_after; return on_exit(e, next, a, t);
+    // Exit from e into `next`, where `next_after` and `next_after2` are the
+    // two edges the agent will take after `next` (used for the spillback
+    // check on `next`).
+    virtual bool on_exit_to(EdgeId e, EdgeId next, EdgeId next_after, AgentId a, SimTime t,
+                            EdgeId next_after2 = kInvalidEdge) {
+        (void)next_after; (void)next_after2; return on_exit(e, next, a, t);
     }
-    // Record (or update, after a reroute) the movement e -> next of an agent
-    // currently on e. Called right after on_enter() and after a mid-link
-    // reroute. Released by a successful exit or force_remove().
-    virtual void assign_movement(EdgeId e, AgentId a, EdgeId next) {
-        (void)e; (void)a; (void)next;
+    // Record (or update, after a reroute) the movement e -> next (-> next_after)
+    // of an agent currently on e. Called right after on_enter() and after a
+    // mid-link reroute. Released by a successful exit or force_remove().
+    virtual void assign_movement(EdgeId e, AgentId a, EdgeId next, EdgeId next_after = kInvalidEdge) {
+        (void)e; (void)a; (void)next; (void)next_after;
     }
     // QNode node model: true if a link's exit buffer is FIFO per movement
     // (next link) rather than per link, i.e. a blocked movement does not
     // block vehicles heading elsewhere (multi-lane approach).
     virtual bool fifo_per_movement() const { return false; }
+    // QNode node model: true if the per-movement FIFO is keyed by the next
+    // two links (lane group chosen for the turn after next), so a blocked
+    // diverge one link downstream does not block the other lane groups.
+    virtual bool fifo_lookahead() const { return false; }
 
     virtual std::string_view model_name() const = 0;
 

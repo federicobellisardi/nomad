@@ -108,7 +108,35 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
         }
         mv_off_[E] = off;
         mv_occ_.assign(off, 0);
+        if (cfg_.movement_lookahead) {
+            // one group counter per (e, next, next_after)
+            mv2_off_.assign(off + 1, 0);
+            uint32_t off2 = 0;
+            for (uint32_t e = 0; e < E; ++e) {
+                NodeId u = graph.edges[e].target;
+                if (u >= graph.num_nodes()) continue;
+                for (uint32_t k = graph.row_ptr[u]; k < graph.row_ptr[u + 1]; ++k) {
+                    mv2_off_[mv_off_[e] + (k - graph.row_ptr[u])] = off2;
+                    NodeId w = graph.edges[graph.col_idx[k]].target;
+                    if (w < graph.num_nodes()) off2 += graph.row_ptr[w + 1] - graph.row_ptr[w];
+                }
+            }
+            mv2_off_[off] = off2;
+            mv2_occ_.assign(off2, 0);
+        }
     }
+}
+
+uint32_t LtmTrafficModel::group_slot(EdgeId e, EdgeId next, EdgeId next_after) const {
+    if (mv2_off_.empty() || next_after == kInvalidEdge || next >= graph_.num_edges()) return kNoSlot;
+    const uint32_t s = movement_slot(e, next);
+    if (s == kNoSlot) return kNoSlot;
+    NodeId w = graph_.edges[next].target;
+    if (w >= graph_.num_nodes()) return kNoSlot;
+    const uint32_t b = graph_.row_ptr[w], end = graph_.row_ptr[w + 1];
+    for (uint32_t k = b; k < end; ++k)
+        if (graph_.col_idx[k] == next_after) return mv2_off_[s] + (k - b);
+    return kNoSlot;
 }
 
 uint32_t LtmTrafficModel::movement_slot(EdgeId e, EdgeId next) const {
@@ -127,6 +155,10 @@ float LtmTrafficModel::movement_cap(EdgeId e, EdgeId next) const {
 }
 
 void LtmTrafficModel::release_movement(AgentId a) {
+    if (a < agent_slot2_.size() && agent_slot2_[a] != kNoSlot) {
+        if (mv2_occ_[agent_slot2_[a]] > 0) --mv2_occ_[agent_slot2_[a]];
+        agent_slot2_[a] = kNoSlot;
+    }
     if (a >= agent_slot_.size()) return;
     uint32_t s = agent_slot_[a];
     if (s == kNoSlot) return;
@@ -134,23 +166,33 @@ void LtmTrafficModel::release_movement(AgentId a) {
     agent_slot_[a] = kNoSlot;
 }
 
-void LtmTrafficModel::assign_movement(EdgeId e, AgentId a, EdgeId next) {
+void LtmTrafficModel::assign_movement(EdgeId e, AgentId a, EdgeId next, EdgeId next_after) {
     if (!cfg_.movement_storage) return;
     if (a >= agent_slot_.size())
         agent_slot_.resize(std::max<std::size_t>(a + 1, agent_slot_.size() * 2), kNoSlot);
+    if (!mv2_off_.empty() && a >= agent_slot2_.size())
+        agent_slot2_.resize(std::max<std::size_t>(a + 1, agent_slot2_.size() * 2), kNoSlot);
     release_movement(a);
     uint32_t s = movement_slot(e, next);
     if (s == kNoSlot) return;
     ++mv_occ_[s];
     agent_slot_[a] = s;
+    uint32_t g = group_slot(e, next, next_after);
+    if (g == kNoSlot) return;
+    ++mv2_occ_[g];
+    agent_slot2_[a] = g;
 }
 
-bool LtmTrafficModel::has_capacity_for(EdgeId e, EdgeId next) const {
+bool LtmTrafficModel::has_capacity_for(EdgeId e, EdgeId next, EdgeId next_after) const {
     if (!has_capacity(e)) return false;
     if (!cfg_.movement_storage) return true;
     uint32_t s = movement_slot(e, next);
     if (s == kNoSlot) return true;
-    return static_cast<float>(mv_occ_[s]) < movement_cap(e, next);
+    if (static_cast<float>(mv_occ_[s]) >= movement_cap(e, next)) return false;
+    uint32_t g = group_slot(e, next, next_after);
+    if (g == kNoSlot) return true;
+    const float share = std::min(1.0f, std::min(lanes_[next], lanes_[next_after]) / lanes_[e]);
+    return static_cast<float>(mv2_occ_[g]) < std::max(1.0f, cells_[e].storage_veh * share);
 }
 
 float LtmTrafficModel::travel_time_for(EdgeId e) const {
@@ -207,8 +249,8 @@ bool LtmTrafficModel::is_major(EdgeId e, EdgeId next) const {
     return major_in_[next] == e;
 }
 
-bool LtmTrafficModel::has_capacity_departure(EdgeId e, EdgeId next) const {
-    if (!has_capacity_for(e, next)) return false;
+bool LtmTrafficModel::has_capacity_departure(EdgeId e, EdgeId next, EdgeId next_after) const {
+    if (!has_capacity_for(e, next, next_after)) return false;
     if (major_in_.empty() || e >= graph_.num_edges()) return true;
     const Cell& c = cells_[e];
     return c.storage_veh - static_cast<float>(c.occupancy) > cfg_.priority_reserve_veh;
@@ -219,7 +261,7 @@ bool LtmTrafficModel::on_exit(EdgeId e, EdgeId next, AgentId a, SimTime t) {
 }
 
 bool LtmTrafficModel::on_exit_to(EdgeId e, EdgeId next, EdgeId next_after,
-                                 AgentId a, SimTime t) {
+                                 AgentId a, SimTime t, EdgeId next_after2) {
     if (e >= graph_.num_edges()) return true;
     Cell& c = cells_[e];
 
@@ -241,7 +283,7 @@ bool LtmTrafficModel::on_exit_to(EdgeId e, EdgeId next, EdgeId next_after,
     // lets congestion genuinely propagate backward instead of only raising
     // the current link's own travel time. Always active, not opt-in.
     bool spillback_blocked =
-        next != kInvalidEdge && next < graph_.num_edges() && !has_capacity_for(next, next_after);
+        next != kInvalidEdge && next < graph_.num_edges() && !has_capacity_for(next, next_after, next_after2);
     // Node priority: a minor approach keeps a free-storage reserve on `next`.
     if (!spillback_blocked && !major_in_.empty() && next != kInvalidEdge &&
         next < graph_.num_edges() && major_in_[next] != e) {
