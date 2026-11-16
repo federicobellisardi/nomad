@@ -287,3 +287,89 @@ TEST_CASE("QNode: node_model is read from the scenario and validated", "[traffic
 TEST_CASE("QNode: default node model is the per-agent retry model", "[traffic][qnode][config]") {
     REQUIRE(SimulationConfig{}.node_model == "agent");
 }
+
+// Merge into a link that drains slower than its in-links can squeeze
+// (Palma: Ma-19 N on-ramp chain discharging at exactly one vehicle per
+// stuck_time for eight hours). Same merge as above, Palma settings:
+// stuck_time 30 s, movement storage on; the bottleneck e3 drains at
+// `bottleneck` veh/h. Plain stuck-time squeezing locks the merge into
+// one vehicle per stuck_time per in-link (A:B = 1:1 at 150 veh/h, 80:80);
+// squeezing only into a stuck receiver restores the capacity share.
+namespace {
+struct SqueezeMergeResult {
+    int from_a = 0, from_b = 0;   // entries into e2, 900 s <= t < 3300 s
+    uint64_t squeezed = 0;
+};
+
+SqueezeMergeResult run_squeeze_merge(float bottleneck, float stuck_s, bool per_receiver,
+                                     bool stuck_receiver, uint64_t seed = 42) {
+    namespace fs = std::filesystem;
+    Graph g = make_merge();
+    g.edges[3].capacity = bottleneck;
+    auto graph = std::make_shared<Graph>(std::move(g));
+    LtmTrafficModel::Config lc;
+    lc.enable_discharge_cap   = true;
+    lc.discharge_burst_s      = 10.0f;
+    lc.movement_storage       = true;
+    lc.stuck_time_s           = stuck_s;
+    lc.squeeze_per_receiver   = per_receiver;
+    lc.squeeze_stuck_receiver = stuck_receiver;
+    SimulationConfig cfg = base_cfg("qnode");
+    cfg.end_time = 3600.0;
+    cfg.seed = seed;
+    Simulation sim(cfg);
+    sim.set_graph(graph);
+    auto model = std::make_unique<LtmTrafficModel>(*graph, lc);
+    const LtmTrafficModel* m = model.get();
+    sim.set_traffic_model(std::move(model));
+    sim.set_router(std::make_unique<AStarRouter>(*graph));
+    auto od = fs::temp_directory_path() / "nomad_test_qnode_squeeze_merge.csv";
+    {
+        std::ofstream f(od);
+        f << "origin_node,dest_node,count,mode,depart_mean_s,depart_std_s\n";
+        f << "0,4,2000,car,0,30\n";   // approach A: agents 0..1999
+        f << "1,4,2000,car,0,30\n";   // approach B: agents 2000..3999
+    }
+    sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
+    SqueezeMergeResult r;
+    sim.register_hook(EventType::AgentEnterLink, [&](const Event& e) {
+        if (e.payload == 2 && e.time >= 900.0 && e.time < 3300.0) (e.agent < 2000 ? r.from_a : r.from_b)++;
+    });
+    sim.run();
+    fs::remove(od);
+    r.squeezed = m->squeezed_exits();
+    return r;
+}
+} // namespace
+
+TEST_CASE("QNode: plain stuck-time squeezing locks a slowly draining merge at one vehicle per stuck_time",
+          "[traffic][qnode][integration][squeeze]") {
+    auto r = run_squeeze_merge(150.0f, 30.0f, false, false);
+    INFO("A=" << r.from_a << " B=" << r.from_b << " squeezed " << r.squeezed);
+    // 2400 s window / 30 s = 80 per in-link, whatever the capacity
+    REQUIRE(r.from_a == 80);
+    REQUIRE(r.from_b == 80);
+}
+
+TEST_CASE("QNode: with stuck-receiver squeezing, a merge is shared by capacity",
+          "[traffic][qnode][integration][squeeze]") {
+    for (float bott : {900.0f, 150.0f}) {
+        for (bool prr : {false, true}) {
+            // pool five seeds: at 150 veh/h one run sees only ~100 entries
+            SqueezeMergeResult r;
+            for (uint64_t seed = 1; seed <= 5; ++seed) {
+                auto q = run_squeeze_merge(bott, 30.0f, prr, true, seed);
+                r.from_a += q.from_a; r.from_b += q.from_b; r.squeezed += q.squeezed;
+            }
+            const double ratio = r.from_b > 0 ? static_cast<double>(r.from_a) / r.from_b : 1e9;
+            INFO("bottleneck " << bott << " veh/h, per_receiver " << prr << ": A=" << r.from_a
+                 << " B=" << r.from_b << " ratio " << ratio << " squeezed " << r.squeezed);
+            CHECK(r.from_b > 0);
+            CHECK(ratio > 3.0 * 0.8);   // capacity ratio 1800:600 = 3, +-20%
+            CHECK(ratio < 3.0 * 1.2);
+            CHECK(r.squeezed == 0);     // no deadlock here: nothing is squeezed
+            // throughput set by the bottleneck
+            CHECK(r.from_a + r.from_b > 5 * 0.85 * bott * (2400.0 / 3600.0));
+        }
+    }
+}

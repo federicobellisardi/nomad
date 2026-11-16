@@ -70,6 +70,7 @@ struct TrafficConfig {
     bool  ltm_movement_lookahead = false; // see LtmTrafficModel::Config::movement_lookahead
     float ltm_stuck_time_s      = 0.0f;   // see LtmTrafficModel::Config::stuck_time_s (0 = off)
     bool  ltm_squeeze_per_receiver = false; // see LtmTrafficModel::Config::squeeze_per_receiver
+    bool  ltm_squeeze_stuck_receiver = false; // see LtmTrafficModel::Config::squeeze_stuck_receiver
     float ltm_priority_reserve_veh = 0.0f;  // see LtmTrafficModel::Config::priority_reserve_veh
 };
 

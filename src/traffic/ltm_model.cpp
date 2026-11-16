@@ -345,7 +345,9 @@ bool LtmTrafficModel::on_exit_gate(EdgeId e, EdgeId next, bool room, AgentId a, 
     if (spillback_blocked && !discharge_blocked && cfg_.stuck_time_s > 0.0f &&
         c.gate_block_since >= 0.0 && t - c.gate_block_since >= cfg_.stuck_time_s &&
         (!cfg_.squeeze_per_receiver ||
-         t - cells_[next].last_squeeze_in >= cfg_.stuck_time_s)) {
+         t - cells_[next].last_squeeze_in >= cfg_.stuck_time_s) &&
+        (!cfg_.squeeze_stuck_receiver || next >= graph_.num_edges() ||
+         t - cells_[next].last_exit >= cfg_.stuck_time_s)) {
         spillback_blocked = false;
         ++n_squeezed_;
         cells_[next].last_squeeze_in = t;
@@ -365,6 +367,7 @@ bool LtmTrafficModel::on_exit_gate(EdgeId e, EdgeId next, bool room, AgentId a, 
     // Gate no longer binding for this exit -- reset.
     c.gate_block_since = -1.0;
     c.gate_wait_s = 0.0f;
+    c.last_exit = t;
 
     if (c.occupancy > 0) --c.occupancy;
     release_movement(a);

@@ -129,3 +129,33 @@ TEST_CASE("Stuck time: per-receiver limit does not affect unblocked exits", "[tr
     REQUIRE(m.on_exit(1, 2, 1, 1.0));
     REQUIRE(m.squeezed_exits() == 0);
 }
+
+TEST_CASE("Stuck time: with stuck-receiver, no squeeze into a receiver that is still draining", "[traffic][stuck]") {
+    Graph g = make_merge();
+    LtmTrafficModel::Config c; c.stuck_time_s = 30.0f; c.squeeze_stuck_receiver = true;
+    LtmTrafficModel m(g, c);
+    m.on_enter(0, 0, 0.0);
+    fill_e2(m);
+    m.on_enter(2, 107, 0.0);                    // e2 one over storage
+    REQUIRE_FALSE(m.on_exit(0, 2, 0, 0.0));     // block starts at t=0
+    REQUIRE(m.on_exit(2, kInvalidEdge, 100, 20.0));   // e2 drains at t=20, still full
+    REQUIRE_FALSE(m.has_capacity(2));
+    REQUIRE_FALSE(m.on_exit(0, 2, 0, 30.0));    // e0 blocked 30 s, but e2 exited 10 s ago
+    REQUIRE_FALSE(m.on_exit(0, 2, 0, 49.0));
+    REQUIRE(m.on_exit(0, 2, 0, 50.0));          // e2 without exit for 30 s: squeezed
+    REQUIRE(m.squeezed_exits() == 1);
+}
+
+TEST_CASE("Stuck time: with stuck-receiver, a deadlocked receiver is still squeezed", "[traffic][stuck]") {
+    Graph g = make_merge();
+    LtmTrafficModel::Config c; c.stuck_time_s = 30.0f; c.squeeze_stuck_receiver = true;
+    LtmTrafficModel m(g, c);
+    m.on_enter(0, 0, 0.0);
+    m.on_enter(1, 1, 0.0);
+    fill_e2(m);                                 // e2 never exits
+    REQUIRE_FALSE(m.on_exit(0, 2, 0, 0.0));
+    REQUIRE_FALSE(m.on_exit(1, 2, 1, 0.0));
+    REQUIRE(m.on_exit(0, 2, 0, 30.0));
+    REQUIRE(m.on_exit(1, 2, 1, 30.0));
+    REQUIRE(m.squeezed_exits() == 2);
+}

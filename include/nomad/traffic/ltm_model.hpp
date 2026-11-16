@@ -111,6 +111,19 @@ public:
         // piled up hundreds of vehicles over storage (Palma: ~18k excess veh).
         bool  squeeze_per_receiver = false;
 
+        // Squeeze only into a stuck receiver (opt-in, needs stuck_time_s > 0).
+        // The stuck-time rule may override a spillback block only if the
+        // receiving link itself has had no exit for stuck_time_s (a true
+        // deadlock). Without it, k blocked in-links each squeeze one vehicle
+        // per stuck_time_s into a receiver that is still draining; when it
+        // drains slower than k / stuck_time_s it never gets back below
+        // storage, every in-link moves at exactly 1 / stuck_time_s whatever
+        // its capacity, and the receiver overfills without bound (Palma:
+        // Ma-19 N on-ramp chain at 30 veh / 15 min for eight hours, micro-
+        // links at up to 80x storage). With it a draining receiver hands its
+        // freed slots to the in-links by the node model (capacity-weighted).
+        bool  squeeze_stuck_receiver = false;
+
         // Node priority (opt-in, 0 = off). Each link has one major approach:
         // on a roundabout link the circulating roundabout approach, otherwise
         // the best road class, ties broken by the straightest continuation.
@@ -183,6 +196,8 @@ private:
         float    gate_wait_s{0.0f};         // duration of the current continuous block
         // Sim time of the last squeezed entry INTO this link (squeeze_per_receiver).
         double   last_squeeze_in{-1e18};
+        // Sim time of the last exit FROM this link (squeeze_stuck_receiver).
+        double   last_exit{-1e18};
     };
 
     float travel_time_for(EdgeId e) const;

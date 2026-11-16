@@ -105,6 +105,7 @@ static int run_scenario(ScenarioConfig cfg) {
         ltm_cfg.movement_lookahead   = cfg.traffic.ltm_movement_lookahead;
         ltm_cfg.stuck_time_s         = cfg.traffic.ltm_stuck_time_s;
         ltm_cfg.squeeze_per_receiver = cfg.traffic.ltm_squeeze_per_receiver;
+        ltm_cfg.squeeze_stuck_receiver = cfg.traffic.ltm_squeeze_stuck_receiver;
         ltm_cfg.priority_reserve_veh = cfg.traffic.ltm_priority_reserve_veh;
         auto ltm = std::make_unique<LtmTrafficModel>(*graph, ltm_cfg);
         ltm_model = ltm.get();
