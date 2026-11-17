@@ -204,7 +204,8 @@ void Simulation::inject_demand() {
     const TdCostTable* td = td_in_.get();
     if (td) spdlog::info("Pre-routing cars on time-dependent link costs ({} bins of {:.0f}s)",
                          td->num_bins(), td->bin_s());
-    if (sigma > 0.0f || td) {
+    const bool gap_rule = replan_gap_ && !routes_in_.empty();
+    if (sigma > 0.0f || td || gap_rule) {
         AStarRouter::Config stoch_cfg;
         stoch_cfg.use_traffic_costs = false;
         stoch_cfg.max_speed_ms      = 33.3f;
@@ -219,11 +220,20 @@ void Simulation::inject_demand() {
     std::vector<StoredPlan> stored;
     std::vector<uint8_t>    keep;
     std::vector<uint32_t>   plan_of;   // agent -> index in `stored`
+    // gap rule: matched agents and their uniform draw, decided after routing
+    std::vector<uint8_t>    matched;
+    std::vector<double>     u_draw, c_old_v, c_best_v;
+    std::vector<uint8_t>    switched;
     n_plan_kept_ = n_plan_rerouted_ = n_plan_mismatch_ = 0;
+    rel_gap_ = -1.0;
     if (!routes_in_.empty()) {
         stored = read_routes(routes_in_, graph_->num_edges());
         keep.assign(n, 0);
         plan_of.assign(n, 0);
+        if (gap_rule) {
+            matched.assign(n, 0); u_draw.assign(n, 1.0);
+            c_old_v.assign(n, 0.0); c_best_v.assign(n, 0.0); switched.assign(n, 0);
+        }
         // Plans are matched by trip (origin, destination, departure, mode):
         // the same agent index first, otherwise any stored plan of the same
         // trip (nested demand sampling: agent indices differ across scales).
@@ -262,12 +272,14 @@ void Simulation::inject_demand() {
                           ^ trip_key(stored[j].origin, stored[j].dest, stored[j].depart, stored[j].mode)
                           ^ 0x5EED9A7A11ull;
             const double u = (splitmix64(st) >> 11) * (1.0 / 9007199254740992.0);
+            if (gap_rule) { matched[a] = 1; u_draw[a] = u; continue; }
             if (u >= replan_fraction_) { keep[a] = 1; ++n_plan_kept_; }
             else ++n_plan_rerouted_;
         }
-        spdlog::info("Replanning (fraction {:.3f}, seed {}): {} plans kept, {} re-routed, "
-                     "{} without a matching stored plan (re-routed)",
-                     replan_fraction_, replan_seed_, n_plan_kept_, n_plan_rerouted_, n_plan_mismatch_);
+        if (!gap_rule)
+            spdlog::info("Replanning (fraction {:.3f}, seed {}): {} plans kept, {} re-routed, "
+                         "{} without a matching stored plan (re-routed)",
+                         replan_fraction_, replan_seed_, n_plan_kept_, n_plan_rerouted_, n_plan_mismatch_);
         if (n_plan_mismatch_ > n / 100)
             spdlog::warn("  {} agents did not match a stored plan: is the demand "
                          "(seed, scale, OD file) identical to the previous iteration?",
@@ -277,6 +289,42 @@ void Simulation::inject_demand() {
     std::atomic<std::size_t> progress{0};
     std::atomic<uint64_t>    n_stoch{0};
     std::atomic<uint64_t>    n_fallback{0};
+
+    // Fresh route for one agent: stochastic (and/or time-dependent) A*,
+    // falling back to the main router.
+    auto route_fresh = [&](AgentId a, const RoutingRequest& req) -> Route {
+        if (stoch_router) {
+            uint32_t seed = route_seed_base ^ (static_cast<uint32_t>(a) * 2654435761u);
+            Route r = stoch_router->route_stochastic(
+                req.origin, req.destination, req.mode, seed, sigma,
+                td, req.departure_time);
+
+            // Reject extreme detours: > 2× crow-fly AND > 5 km.
+            // Falls back to CH so bad hashes never lose an agent.
+            float haversine_m = graph_->haversine(req.origin, req.destination);
+            // Not applied with time-dependent costs: a detour
+            // around a queue is then a legitimate choice.
+            bool too_long = !td
+                            && r.estimated_dist_m > 2.0f * haversine_m
+                            && r.estimated_dist_m > 5000.0f;
+            if (r.is_valid && !r.edges.empty() && !too_long) {
+                ++n_stoch;
+                return r;
+            }
+            ++n_fallback;
+        }
+        return router_->route(req);
+    };
+    // Time-dependent cost of a route departing at t_dep, as the pre-router
+    // sees it (input link costs for cars, free flow otherwise; no noise).
+    auto route_cost = [&](const std::vector<EdgeId>& edges, double t_dep, AgentMode mode) -> double {
+        double t = t_dep;
+        for (EdgeId e : edges) {
+            float ff = graph_->mode_free_flow_time(e, mode, cfg_.walk_speed_ms, cfg_.bike_speed_ms);
+            t += (td && mode == AgentMode::Car) ? td->cost(e, t, ff) : ff;
+        }
+        return t - t_dep;
+    };
     impl_->arena.execute([&] {
         tbb::parallel_for(tbb::blocked_range<AgentId>(0, static_cast<AgentId>(n), 256),
             [&](const tbb::blocked_range<AgentId>& rng) {
@@ -295,29 +343,30 @@ void Simulation::inject_demand() {
                         plan.preferred_mode
                     };
 
-                    if (stoch_router) {
-                        uint32_t seed = route_seed_base ^ (static_cast<uint32_t>(a) * 2654435761u);
-                        Route r = stoch_router->route_stochastic(
-                            req.origin, req.destination, req.mode, seed, sigma,
-                            td, req.departure_time);
-
-                        // Reject extreme detours: > 2× crow-fly AND > 5 km.
-                        // Falls back to CH so bad hashes never lose an agent.
-                        float haversine_m = graph_->haversine(req.origin, req.destination);
-                        // Not applied with time-dependent costs: a detour
-                        // around a queue is then a legitimate choice.
-                        bool too_long = !td
-                                        && r.estimated_dist_m > 2.0f * haversine_m
-                                        && r.estimated_dist_m > 5000.0f;
-                        if (r.is_valid && !r.edges.empty() && !too_long) {
-                            route_results[a] = std::move(r);
-                            ++n_stoch;
-                            continue;
+                    route_results[a] = route_fresh(a, req);
+                    if (!matched.empty() && matched[a]) {
+                        // Gap rule: compare the stored route with the new one
+                        // and with the deterministic best on the input costs.
+                        const auto& old_edges = stored[plan_of[a]].edges;
+                        const double c_old = route_cost(old_edges, req.departure_time, req.mode);
+                        const Route& rn = route_results[a];
+                        const bool new_ok = rn.is_valid && !rn.edges.empty();
+                        const double c_new = new_ok ? route_cost(rn.edges, req.departure_time, req.mode) : c_old;
+                        Route rb = stoch_router->route_stochastic(req.origin, req.destination, req.mode,
+                                                                  0u, 0.0f, td, req.departure_time);
+                        double c_best = std::min(c_old, c_new);
+                        if (rb.is_valid && !rb.edges.empty())
+                            c_best = std::min(c_best, route_cost(rb.edges, req.departure_time, req.mode));
+                        c_old_v[a] = c_old; c_best_v[a] = c_best;
+                        const double g = c_old > 0.0 ? (c_old - c_new) / c_old : 0.0;
+                        const double p = g > gap_band_ ? std::min(1.0, static_cast<double>(gap_alpha_) * g) : 0.0;
+                        if (new_ok && u_draw[a] < p) {
+                            switched[a] = 1;
+                        } else {
+                            route_results[a].edges    = old_edges;
+                            route_results[a].is_valid = true;
                         }
-                        ++n_fallback;
                     }
-
-                    route_results[a] = router_->route(req);
                 }
                 std::size_t done = progress.fetch_add(rng.size()) + rng.size();
                 if (done % 20000 < 256) {
@@ -333,6 +382,24 @@ void Simulation::inject_demand() {
                       n_stoch.load(), n,
                       100.0 * n_stoch.load() / std::max(n, std::size_t{1}),
                       n_fallback.load());
+
+    if (!matched.empty()) {
+        double sum_old = 0.0, sum_best = 0.0;
+        std::size_t n_matched = 0;
+        for (AgentId a = 0; a < static_cast<AgentId>(n); ++a) {
+            if (!matched[a]) continue;
+            ++n_matched;
+            sum_old += c_old_v[a]; sum_best += c_best_v[a];
+            if (switched[a]) ++n_plan_rerouted_; else ++n_plan_kept_;
+        }
+        rel_gap_ = sum_old > 0.0 ? (sum_old - sum_best) / sum_old : 0.0;
+        spdlog::info("Replanning (gap rule, alpha {:.2f}, band {:.3f}, seed {}): {} plans kept, "
+                     "{} switched, {} without a matching stored plan (re-routed)",
+                     gap_alpha_, gap_band_, replan_seed_, n_plan_kept_, n_plan_rerouted_, n_plan_mismatch_);
+        spdlog::info("Relative gap of stored plans on input costs: RG={:.4f} "
+                     "(sum c_old {:.4g} s, sum c_best {:.4g} s, {} plans)",
+                     rel_gap_, sum_old, sum_best, n_matched);
+    }
 
     std::size_t routed = 0, failed = 0;
     for (AgentId a = 0; a < static_cast<AgentId>(n); ++a) {
@@ -1355,7 +1422,28 @@ void Simulation::write_td_costs(const std::filesystem::path& p) const {
         rec.record(hot_.current_edge[a], hot_.enter_time[a], now);
         ++censored;
     }
-    rec.table().save(p);
+    TdCostTable out = rec.table();
+    if (td_smoothing_ < 1.0f && td_in_) {
+        const TdCostTable& prev = *td_in_;
+        if (prev.num_edges() != out.num_edges() || prev.num_bins() != out.num_bins()
+            || prev.bin_s() != out.bin_s() || prev.t0() != out.t0())
+            throw std::runtime_error("write_td_costs: smoothing needs td_costs_in with the same "
+                                     "edges and bins as the recorded table");
+        const double lam = td_smoothing_;
+        const uint32_t B = out.num_bins();
+        for (uint32_t e = 0; e < out.num_edges(); ++e) {
+            const float ff = graph_->free_flow_time(e);
+            for (uint32_t b = 0; b < B; ++b) {
+                const std::size_t i = static_cast<std::size_t>(e) * B + b;
+                const float o = out.tt()[i], q = prev.tt()[i];
+                if (o != o && q != q) continue;               // no information on either side
+                const double xo = (o == o) ? o : ff, xq = (q == q) ? q : ff;
+                out.tt()[i] = static_cast<float>((1.0 - lam) * xq + lam * xo);
+            }
+        }
+        spdlog::info("Link costs smoothed with the input table (lambda {:.2f})", lam);
+    }
+    out.save(p);
     spdlog::info("Time-dependent link costs written to {} ({} cars censored at t={:.0f}s)",
                  p.string(), censored, now);
 }

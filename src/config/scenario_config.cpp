@@ -112,6 +112,9 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.routing.routes_in           = r.value("routes_in",           cfg.routing.routes_in);
         cfg.routing.replan_fraction     = r.value("replan_fraction",     cfg.routing.replan_fraction);
         cfg.routing.replan_seed         = r.value("replan_seed",         cfg.routing.replan_seed);
+        cfg.routing.replan_rule         = r.value("replan_rule",         cfg.routing.replan_rule);
+        cfg.routing.replan_gap_alpha    = r.value("replan_gap_alpha",    cfg.routing.replan_gap_alpha);
+        cfg.routing.replan_gap_band     = r.value("replan_gap_band",     cfg.routing.replan_gap_band);
         if (r.contains("ch_cache"))
             cfg.routing.ch_cache = r["ch_cache"].get<std::string>();
     }
@@ -213,6 +216,7 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
         cfg.output.td_costs_out        = o.value("td_costs_out",        cfg.output.td_costs_out);
         cfg.output.routes_out          = o.value("routes_out",          cfg.output.routes_out);
         cfg.output.td_bin_s            = o.value("td_bin_s",            cfg.output.td_bin_s);
+        cfg.output.td_smoothing        = o.value("td_smoothing",        cfg.output.td_smoothing);
         if (o.contains("trace_edges"))
             cfg.output.trace_edges = o["trace_edges"].get<std::vector<uint32_t>>();
         cfg.output.routes_only         = o.value("routes_only",         cfg.output.routes_only);
@@ -273,6 +277,11 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
         j["routing"]["routes_in"]       = cfg.routing.routes_in;
         j["routing"]["replan_fraction"] = cfg.routing.replan_fraction;
         j["routing"]["replan_seed"]     = cfg.routing.replan_seed;
+        j["routing"]["replan_rule"]     = cfg.routing.replan_rule;
+        if (cfg.routing.replan_rule == "gap") {
+            j["routing"]["replan_gap_alpha"] = cfg.routing.replan_gap_alpha;
+            j["routing"]["replan_gap_band"]  = cfg.routing.replan_gap_band;
+        }
     }
 
     j["traffic"]["model"]                    = cfg.traffic.model;
@@ -294,6 +303,7 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     if (!cfg.output.td_costs_out.empty()) {
         j["output"]["td_costs_out"]    = cfg.output.td_costs_out;
         j["output"]["td_bin_s"]        = cfg.output.td_bin_s;
+        j["output"]["td_smoothing"]    = cfg.output.td_smoothing;
     }
     if (!cfg.output.trace_edges.empty())
         j["output"]["trace_edges"]     = cfg.output.trace_edges;
@@ -323,6 +333,14 @@ std::string ScenarioConfigIO::validate(const ScenarioConfig& cfg) {
         return "simulation.node_model must be \"agent\" or \"qnode\"";
     if (!(cfg.routing.replan_fraction >= 0.0f && cfg.routing.replan_fraction <= 1.0f))
         return "routing.replan_fraction must be in [0, 1]";
+    if (cfg.routing.replan_rule != "random" && cfg.routing.replan_rule != "gap")
+        return "routing.replan_rule must be \"random\" or \"gap\"";
+    if (!(cfg.routing.replan_gap_alpha > 0.0f))
+        return "routing.replan_gap_alpha must be > 0";
+    if (!(cfg.routing.replan_gap_band >= 0.0f && cfg.routing.replan_gap_band < 1.0f))
+        return "routing.replan_gap_band must be in [0, 1)";
+    if (!(cfg.output.td_smoothing > 0.0f && cfg.output.td_smoothing <= 1.0f))
+        return "output.td_smoothing must be in (0, 1]";
     return {};
 }
 

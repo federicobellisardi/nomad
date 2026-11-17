@@ -119,6 +119,17 @@ public:
     void set_replanning(std::filesystem::path routes_in, float fraction, uint32_t seed) {
         routes_in_ = std::move(routes_in); replan_fraction_ = fraction; replan_seed_ = seed;
     }
+    // Gap-based replanning (instead of the random draw): every matched agent
+    // is routed on the time-dependent costs and switches with probability
+    // min(1, alpha * g), g = relative gain over its stored route; g <= band
+    // never switches. replan_relative_gap() is the relative gap
+    // sum(c_old - c_best) / sum(c_old) of the stored plans, measured on the
+    // input costs with deterministic best routes (-1 if not measured).
+    void set_replan_gap(float alpha, float band) { replan_gap_ = true; gap_alpha_ = alpha; gap_band_ = band; }
+    double replan_relative_gap() const { return rel_gap_; }
+    // Smoothing of the written link costs against the input table, see
+    // OutputConfig::td_smoothing. 1 = write the experienced costs only.
+    void set_td_smoothing(float lambda) { td_smoothing_ = lambda; }
     std::size_t replan_kept()     const { return n_plan_kept_; }
     std::size_t replan_rerouted() const { return n_plan_rerouted_; }
     std::size_t replan_mismatch() const { return n_plan_mismatch_; }
@@ -232,6 +243,10 @@ private:
     std::filesystem::path               routes_out_, routes_in_;
     float                               replan_fraction_ = 1.0f;
     uint32_t                            replan_seed_     = 0;
+    bool                                replan_gap_      = false;
+    float                               gap_alpha_       = 1.0f, gap_band_ = 0.0f;
+    double                              rel_gap_         = -1.0;
+    float                               td_smoothing_    = 1.0f;
     std::size_t n_plan_kept_ = 0, n_plan_rerouted_ = 0, n_plan_mismatch_ = 0;
     void write_routes(const std::filesystem::path& p) const;
     std::vector<std::unique_ptr<IOutputWriter>> writers_;

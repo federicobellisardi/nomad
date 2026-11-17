@@ -269,11 +269,19 @@ static int run_scenario(ScenarioConfig cfg) {
         spdlog::info("Loaded time-dependent link costs from {}", cfg.routing.td_costs_in);
         sim.set_td_costs(std::move(td));
     }
-    if (!cfg.output.td_costs_out.empty()) sim.enable_td_recording(cfg.output.td_bin_s);
+    if (!cfg.output.td_costs_out.empty()) {
+        sim.enable_td_recording(cfg.output.td_bin_s);
+        sim.set_td_smoothing(cfg.output.td_smoothing);
+    }
     if (!cfg.routing.routes_in.empty()) {
         spdlog::info("Partial replanning from {} (fraction {:.3f}, seed {})",
                      cfg.routing.routes_in, cfg.routing.replan_fraction, cfg.routing.replan_seed);
         sim.set_replanning(cfg.routing.routes_in, cfg.routing.replan_fraction, cfg.routing.replan_seed);
+        if (cfg.routing.replan_rule == "gap") {
+            if (cfg.routing.td_costs_in.empty())
+                spdlog::warn("replan_rule gap without td_costs_in: gaps are measured at free flow");
+            sim.set_replan_gap(cfg.routing.replan_gap_alpha, cfg.routing.replan_gap_band);
+        }
     }
     if (!cfg.output.routes_out.empty()) sim.set_routes_out(cfg.output.routes_out);
     // ── Diagnostic edge traces (output only) ──────────────────────────────────

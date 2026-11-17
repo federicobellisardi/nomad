@@ -10,6 +10,7 @@
 #include <nomad/routing/astar_router.hpp>
 #include <nomad/traffic/ltm_model.hpp>
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -72,10 +73,15 @@ void write_plans(const fs::path& p, const std::vector<Plan>& plans, uint32_t num
     }
 }
 
-struct RunOut { std::size_t kept = 0, rerouted = 0, mismatch = 0; std::vector<Plan> plans; };
+struct RunOut {
+    std::size_t kept = 0, rerouted = 0, mismatch = 0; std::vector<Plan> plans;
+    double rel_gap = -1.0;
+};
 
+// gap_alpha > 0 switches on the gap-based rule (fraction is then ignored)
 RunOut run(const std::string& tag, const fs::path& routes_in, float fraction, uint32_t seed,
-           int count = 200, float nested_scale = 0.0f) {
+           int count = 200, float nested_scale = 0.0f,
+           float gap_alpha = 0.0f, float gap_band = 0.0f) {
     auto graph = std::make_shared<Graph>(make_two_routes());
     SimulationConfig cfg;
     cfg.start_time = 0.0; cfg.end_time = 600.0; cfg.sync_window_s = 5.0f;
@@ -100,8 +106,10 @@ RunOut run(const std::string& tag, const fs::path& routes_in, float fraction, ui
     auto out = fs::temp_directory_path() / ("nomad_test_replan_routes_" + tag + ".bin");
     sim.set_routes_out(out);
     if (!routes_in.empty()) sim.set_replanning(routes_in, fraction, seed);
+    if (gap_alpha > 0.0f) sim.set_replan_gap(gap_alpha, gap_band);
     sim.run();
-    RunOut r{sim.replan_kept(), sim.replan_rerouted(), sim.replan_mismatch(), read_plans(out)};
+    RunOut r{sim.replan_kept(), sim.replan_rerouted(), sim.replan_mismatch(), read_plans(out),
+             sim.replan_relative_gap()};
     fs::remove(od); fs::remove(out);
     return r;
 }
@@ -210,4 +218,73 @@ TEST_CASE("Replanning: with nested sampling, plans learnt at a lower scale are r
     REQUIRE(r.kept == it0.plans.size());              // every 0.5 trip found its plan
     REQUIRE(r.mismatch == 400 - it0.plans.size());     // the new trips are routed afresh
     REQUIRE(long_agents(r).size() == it0.plans.size());
+}
+
+// Gap-based replanning. On make_two_routes() at 20 m/s and free flow the long
+// route costs 40 s and the short one 15 s: every stored long plan has a
+// relative gap (40 - 15) / 40 = 0.625.
+TEST_CASE("Replanning (gap rule): switch probability is alpha times the relative gap",
+          "[routing][replan][gap]") {
+    auto in = long_plans("gap_share");
+    auto r = run("gap_share", in, 0.0f, 7, 200, 0.0f, 1.0f, 0.0f);
+    REQUIRE(r.mismatch == 0);
+    REQUIRE(r.kept + r.rerouted == 200);
+    REQUIRE(r.rerouted > 100);           // binomial(200, 0.625): mean 125, sd 6.8
+    REQUIRE(r.rerouted < 150);
+    REQUIRE(long_agents(r).size() == r.kept);
+    REQUIRE(std::abs(r.rel_gap - 0.625) < 1e-3);
+    // alpha * gap >= 1: everybody switches
+    auto all = run("gap_all", in, 0.0f, 7, 200, 0.0f, 2.0f, 0.0f);
+    REQUIRE(all.rerouted == 200);
+    REQUIRE(long_agents(all).empty());
+    fs::remove(in);
+}
+
+TEST_CASE("Replanning (gap rule): gains inside the indifference band never switch",
+          "[routing][replan][gap]") {
+    auto in = long_plans("gap_band");
+    auto r = run("gap_band", in, 1.0f, 7, 200, 0.0f, 2.0f, 0.7f);
+    REQUIRE(r.kept == 200);
+    REQUIRE(long_agents(r).size() == 200);
+    REQUIRE(std::abs(r.rel_gap - 0.625) < 1e-3);   // the gap is still measured
+    fs::remove(in);
+}
+
+TEST_CASE("Replanning (gap rule): agents already on the best route keep it, gap 0",
+          "[routing][replan][gap]") {
+    auto it0 = run("gap_opt_it0", {}, 1.0f, 0);
+    auto p = fs::temp_directory_path() / "nomad_test_replan_short.bin";
+    write_plans(p, it0.plans, 4);
+    auto r = run("gap_opt", p, 1.0f, 7, 200, 0.0f, 5.0f, 0.0f);
+    fs::remove(p);
+    REQUIRE(r.kept == 200);
+    REQUIRE(long_agents(r).empty());
+    REQUIRE(std::abs(r.rel_gap) < 1e-6);
+}
+
+TEST_CASE("Replanning (gap rule): options are read from the scenario and validated",
+          "[routing][replan][gap][config]") {
+    auto p = fs::temp_directory_path() / "nomad_test_replan_gap_scenario.json";
+    {
+        std::ofstream f(p);
+        f << R"({"simulation": {"start_time": 0, "end_time": 3600},
+                 "network": {"osm_pbf": "/dev/null"},
+                 "routing": {"routes_in": "a.bin", "replan_rule": "gap",
+                             "replan_gap_alpha": 1.5, "replan_gap_band": 0.05},
+                 "output": {"td_costs_out": "c.bin", "td_smoothing": 0.5}})";
+    }
+    auto cfg = ScenarioConfigIO::load(p);
+    fs::remove(p);
+    cfg.demand.source = "none";
+    REQUIRE(cfg.routing.replan_rule == "gap");
+    REQUIRE(cfg.routing.replan_gap_alpha == 1.5f);
+    REQUIRE(cfg.routing.replan_gap_band == 0.05f);
+    REQUIRE(cfg.output.td_smoothing == 0.5f);
+    REQUIRE(ScenarioConfigIO::validate(cfg).empty());
+    auto bad = cfg; bad.routing.replan_rule = "best";
+    REQUIRE(ScenarioConfigIO::validate(bad).find("replan_rule") != std::string::npos);
+    bad = cfg; bad.routing.replan_gap_alpha = 0.0f;
+    REQUIRE(ScenarioConfigIO::validate(bad).find("replan_gap_alpha") != std::string::npos);
+    bad = cfg; bad.output.td_smoothing = 0.0f;
+    REQUIRE(ScenarioConfigIO::validate(bad).find("td_smoothing") != std::string::npos);
 }

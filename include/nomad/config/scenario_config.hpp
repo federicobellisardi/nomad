@@ -56,6 +56,15 @@ struct RoutingConfig {
     std::string routes_in;
     float       replan_fraction = 1.0f;
     uint32_t    replan_seed     = 0;
+    // Which agents re-route. "random": a share replan_fraction drawn at random.
+    // "gap": every matched agent is routed on td_costs_in and switches to the
+    // new route with probability min(1, replan_gap_alpha * g), where
+    // g = (c_old - c_new) / c_old is the relative gain in time-dependent cost
+    // over its stored route; g <= replan_gap_band never switches
+    // (indifference band). replan_fraction is ignored under "gap".
+    std::string replan_rule      = "random";
+    float       replan_gap_alpha = 1.0f;
+    float       replan_gap_band  = 0.0f;
 };
 
 struct TrafficConfig {
@@ -134,6 +143,10 @@ struct OutputConfig {
     // Route plans after pre-routing (input for routing.routes_in). Empty = off.
     std::string routes_out;
     float       td_bin_s = 900.0f;
+    // Exponential smoothing of the written link costs against td_costs_in:
+    // written = (1 - td_smoothing) * input + td_smoothing * experienced, a
+    // missing value on either side standing for free flow. 1 = no smoothing.
+    float       td_smoothing = 1.0f;
     // Diagnostic: log every car/walk/bike entry onto these edges, with the
     // agent's full current route, to <output_dir>/edge_traces.csv.
     // Output only; does not affect the dynamics.

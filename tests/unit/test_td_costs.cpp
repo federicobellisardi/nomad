@@ -164,3 +164,45 @@ TEST_CASE("Simulation pre-routes on time-dependent costs", "[routing][td][integr
     CHECK(used.count(1) == 1);
     CHECK(used.count(3) == 1);
 }
+
+// Smoothing: written cell = (1 - lambda) * previous + lambda * observed, where
+// a missing value on either side stands for free flow; cells missing on both
+// sides stay empty.
+TEST_CASE("Simulation smooths written link costs with the input table", "[routing][td][smoothing]") {
+    auto graph = std::make_shared<Graph>(make_diamond());
+    auto run_once = [&](float lambda, const fs::path& p) {
+        auto td = std::make_shared<TdCostTable>(4, 3, 300.0f, 0.0);
+        for (uint32_t b = 0; b < 3; ++b) td->tt()[1 * 3 + b] = 500.0f;   // path B slow
+        Simulation sim(small_cfg());
+        sim.set_graph(graph);
+        sim.set_traffic_model(std::make_unique<LtmTrafficModel>(*graph));
+        sim.set_router(std::make_unique<AStarRouter>(*graph));
+        auto od = write_od("smooth");
+        sim.set_demand(std::make_shared<OdMatrixDemand>(OdMatrixDemand::from_csv(od)));
+        sim.set_td_costs(td);
+        sim.enable_td_recording(300.0f);
+        sim.set_td_smoothing(lambda);
+        sim.run();
+        fs::remove(od);
+        sim.write_td_costs(p);
+        return TdCostTable::load(p);
+    };
+    auto p1 = fs::temp_directory_path() / "nomad_test_td_smooth_raw.bin";
+    auto p2 = fs::temp_directory_path() / "nomad_test_td_smooth_half.bin";
+    TdCostTable raw = run_once(1.0f, p1), sm = run_once(0.5f, p2);
+    fs::remove(p1); fs::remove(p2);
+    const float ff0 = graph->free_flow_time(0), ff1 = graph->free_flow_time(1);
+    for (uint32_t b = 0; b < 3; ++b) {
+        // e1: previous 500, no observation (free flow)
+        CHECK(std::isnan(raw.tt()[1 * 3 + b]));
+        CHECK_THAT(sm.tt()[1 * 3 + b], WithinAbs(0.5 * 500.0 + 0.5 * ff1, 1e-3));
+        // e0: no previous value (free flow), observed where cars entered
+        if (raw.n()[0 * 3 + b] > 0)
+            CHECK_THAT(sm.tt()[0 * 3 + b], WithinAbs(0.5 * ff0 + 0.5 * raw.tt()[0 * 3 + b], 1e-3));
+        else
+            CHECK(std::isnan(sm.tt()[0 * 3 + b]));
+        CHECK(sm.n()[0 * 3 + b] == raw.n()[0 * 3 + b]);
+        // e3: neither previous value nor observation
+        CHECK(std::isnan(sm.tt()[3 * 3 + b]));
+    }
+}
