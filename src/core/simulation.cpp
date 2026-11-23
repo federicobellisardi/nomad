@@ -709,15 +709,21 @@ void Simulation::handle_node_step(const Event& e) {
     if (n >= qnode_next_.size()) return;
     qnode_next_[n] = -1.0;
 
-    // in-links with waiting cars, and their capacities
-    std::vector<std::pair<EdgeId, float>> act;
-    double total = 0.0;
+    // in-links with waiting cars, and their capacities. With priority
+    // service the major approaches form a first group served before the
+    // minor ones (give-way); within a group the draw is capacity-weighted.
+    const bool prio = traffic_ && traffic_->priority_service();
+    std::vector<std::pair<EdgeId, float>> act, act_minor;
+    double total = 0.0, total_minor = 0.0;
     for (uint32_t k = qin_ptr_[n]; k < qin_ptr_[n + 1]; ++k) {
         EdgeId ein = qin_idx_[k];
         if (qbuf_[ein].empty()) continue;
         float c = std::max(1.0f, graph_->edges[ein].capacity);
-        act.emplace_back(ein, c);
-        total += c;
+        if (prio && !traffic_->is_major_at_node(ein)) {
+            act_minor.emplace_back(ein, c); total_minor += c;
+        } else {
+            act.emplace_back(ein, c); total += c;
+        }
     }
     // reproducible stream per (seed, node, second)
     uint64_t st = (static_cast<uint64_t>(cfg_.seed) << 32) ^ (static_cast<uint64_t>(n) * 0x9E3779B1ull)
@@ -725,7 +731,8 @@ void Simulation::handle_node_step(const Event& e) {
     const bool per_mv = traffic_ && traffic_->fifo_per_movement();
     bool remaining = false;
 
-    while (!act.empty()) {
+    while (!act.empty() || !act_minor.empty()) {
+        if (act.empty()) { act.swap(act_minor); total = total_minor; }   // minor group after the majors
         // draw an in-link with probability proportional to capacity
         const double u = (splitmix64(st) >> 11) * (1.0 / 9007199254740992.0) * total;
         std::size_t pick = act.size() - 1;

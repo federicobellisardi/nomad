@@ -14,6 +14,7 @@ add_executable(nomad_tests
     unit/test_implied_oneway.cpp
     unit/test_osm_lanes.cpp
     unit/test_priority.cpp
+    unit/test_priority_service_sim.cpp
     unit/test_osm_derating.cpp
     unit/test_osm_capacity_config.cpp
     unit/test_qnode.cpp

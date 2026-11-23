@@ -111,3 +111,44 @@ TEST_CASE("Priority: stuck-time squeeze still overrides a minor block", "[traffi
     REQUIRE_FALSE(m.on_exit_to(1, 2, 3, 2, 30.0));
     REQUIRE(m.on_exit_to(1, 2, 3, 2, 41.0));       // >= 30 s blocked
 }
+
+// ── Link yield rule and priority-ordered service (priority_service) ─────────
+namespace {
+Graph make_ramp_merge() {           // side approach is a motorway_link joining a primary
+    Graph g = make_merge();
+    g.edges[1].road_class = static_cast<uint8_t>(RoadClass::MotorwayLink);
+    return g;
+}
+LtmTrafficModel make_service(const Graph& g) {
+    LtmTrafficModel::Config c;
+    c.priority_service = true;
+    return LtmTrafficModel(g, c);
+}
+} // namespace
+
+TEST_CASE("Priority: a *_link approach yields to the through road despite its class", "[traffic][priority]") {
+    Graph g = make_ramp_merge();
+    auto m = make(g, 2.0f);
+    REQUIRE(m.is_major(0, 2));          // primary through road
+    REQUIRE_FALSE(m.is_major(1, 2));    // motorway_link ramp
+}
+
+TEST_CASE("Priority service: major approaches are flagged per node, no storage reserve", "[traffic][priority][service]") {
+    Graph g = make_ramp_merge();
+    auto m = make_service(g);
+    REQUIRE(m.priority_service());
+    REQUIRE(m.is_major_at_node(0));
+    REQUIRE_FALSE(m.is_major_at_node(1));
+    // no reserve: a minor entry is admitted whenever the receiver has room
+    m.on_enter(1, 2, 0.0);
+    fill_receiver(m, 5);                // free 1.67
+    REQUIRE(m.on_exit_to(1, 2, 3, 2, 10.0));
+    REQUIRE(m.has_capacity_departure(2, 3));
+}
+
+TEST_CASE("Priority service: off by default", "[traffic][priority][service]") {
+    Graph g = make_ramp_merge();
+    LtmTrafficModel m(g);
+    REQUIRE_FALSE(m.priority_service());
+    REQUIRE(m.is_major_at_node(1));     // every approach counts as major when off
+}

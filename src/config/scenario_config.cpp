@@ -141,6 +141,8 @@ ScenarioConfig ScenarioConfigIO::load(const std::filesystem::path& json_path) {
                                                            cfg.traffic.ltm_squeeze_stuck_receiver);
         cfg.traffic.ltm_priority_reserve_veh = t.value("ltm_priority_reserve_veh",
                                                          cfg.traffic.ltm_priority_reserve_veh);
+        cfg.traffic.ltm_priority_service     = t.value("ltm_priority_service",
+                                                         cfg.traffic.ltm_priority_service);
     }
 
     // ── demand ──────────────────────────────────────────────────────────────
@@ -293,6 +295,7 @@ void ScenarioConfigIO::save(const ScenarioConfig& cfg,
     j["traffic"]["ltm_squeeze_per_receiver"] = cfg.traffic.ltm_squeeze_per_receiver;
     j["traffic"]["ltm_squeeze_stuck_receiver"] = cfg.traffic.ltm_squeeze_stuck_receiver;
     j["traffic"]["ltm_priority_reserve_veh"] = cfg.traffic.ltm_priority_reserve_veh;
+    j["traffic"]["ltm_priority_service"]     = cfg.traffic.ltm_priority_service;
     j["demand"]["source"]           = cfg.demand.source;
     if (cfg.demand.od_csv)
         j["demand"]["od_csv"]       = cfg.demand.od_csv->string();

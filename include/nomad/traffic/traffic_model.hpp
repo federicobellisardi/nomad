@@ -168,6 +168,9 @@ public:
     // QNode node model: true if the per-movement FIFO is keyed by the lane
     // group (fifo_group), not by the next link.
     virtual bool fifo_lookahead() const { return false; }
+    // QNode node model: serve major approaches before minor ones (give-way).
+    virtual bool priority_service() const { return false; }
+    virtual bool is_major_at_node(EdgeId e) const { (void)e; return true; }
 
     // ── Path-aware variants (used by the engine) ──
     // `after` = the edges the agent takes after e, in order (after[0] = next).

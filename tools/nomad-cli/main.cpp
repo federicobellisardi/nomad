@@ -107,6 +107,7 @@ static int run_scenario(ScenarioConfig cfg) {
         ltm_cfg.squeeze_per_receiver = cfg.traffic.ltm_squeeze_per_receiver;
         ltm_cfg.squeeze_stuck_receiver = cfg.traffic.ltm_squeeze_stuck_receiver;
         ltm_cfg.priority_reserve_veh = cfg.traffic.ltm_priority_reserve_veh;
+        ltm_cfg.priority_service     = cfg.traffic.ltm_priority_service;
         auto ltm = std::make_unique<LtmTrafficModel>(*graph, ltm_cfg);
         ltm_model = ltm.get();
         sim.set_traffic_model(std::move(ltm));

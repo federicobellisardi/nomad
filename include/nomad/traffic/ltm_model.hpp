@@ -133,6 +133,18 @@ public:
         // of links (dual carriageway + U-turns, Palma) reached jam density and
         // deadlocked. The stuck-time squeeze still overrides the block.
         float priority_reserve_veh = 0.0f;
+        // Priority-ordered node service (opt-in, QNode only). At every node
+        // step the in-links that are the major approach of some out-link of
+        // the node are served first; the others take the receiving capacity
+        // that is left (give-way). No storage reserve is kept. Without it the
+        // capacity-proportional draw lets entries compete with circulating
+        // flow, so a ring of links (Palma, Ma-20 / Ma-1110 Son Espases)
+        // fills and locks.
+        // Major approach (both priority rules): the circulating approach on a
+        // roundabout link, otherwise a through road over any *_link connector
+        // (ramps yield), then the best road class, ties broken by the
+        // straightest continuation.
+        bool  priority_service = false;
     };
 
     explicit LtmTrafficModel(const Graph& graph);
@@ -151,6 +163,10 @@ public:
     // True if `e` is the major approach of `next` (always true when the
     // priority rule is off).
     bool    is_major(EdgeId e, EdgeId next) const;
+    bool    priority_service() const override { return cfg_.priority_service; }
+    // True if e is the major approach of at least one out-link of its target
+    // node (always true when no priority rule is on).
+    bool    is_major_at_node(EdgeId e) const override;
     bool    has_capacity_for(EdgeId e, EdgeId next,
                              EdgeId next_after = kInvalidEdge) const      override;
     bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
@@ -220,6 +236,7 @@ private:
     float    movement_cap (EdgeId e, EdgeId next) const;
     void     release_movement(AgentId a);
     std::vector<EdgeId>   major_in_;   // major approach of each link (priority rule)
+    std::vector<uint8_t>  major_at_node_;   // e is major for some out-link of target(e)
     std::vector<float>    lanes_;
     std::vector<uint32_t> mv_off_;
     std::vector<int32_t>  mv_occ_;

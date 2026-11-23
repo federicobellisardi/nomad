@@ -46,7 +46,7 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
         states_[e].travel_time_s.store(graph.free_flow_time(e), std::memory_order_relaxed);
     }
 
-    if (cfg_.priority_reserve_veh > 0.0f) {
+    if (cfg_.priority_reserve_veh > 0.0f || cfg_.priority_service) {
         // in-edges per node
         const uint32_t N = graph.num_nodes();
         std::vector<uint32_t> in_ptr(N + 1, 0);
@@ -84,8 +84,15 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
                 if (src[e] == w) continue;                   // U-turn of the same segment
                 if (!edge_accessible(graph.edges[e].road_class, graph.edges[e].flags, AgentMode::Car)) continue;
                 const bool e_rb = graph.edges[e].flags & EdgeFlags::Roundabout;
-                // rank: circulating roundabout approach first on a roundabout link, then class
-                const int rank = (n_rb && e_rb ? 0 : 1000) + graph.edges[e].road_class;
+                // rank: circulating roundabout approach first on a roundabout link,
+                // then through roads before *_link connectors (ramps yield), then class
+                const uint8_t rc = graph.edges[e].road_class;
+                const bool is_link = rc == static_cast<uint8_t>(RoadClass::MotorwayLink) ||
+                                     rc == static_cast<uint8_t>(RoadClass::TrunkLink) ||
+                                     rc == static_cast<uint8_t>(RoadClass::PrimaryLink) ||
+                                     rc == static_cast<uint8_t>(RoadClass::SecondaryLink) ||
+                                     rc == static_cast<uint8_t>(RoadClass::TertiaryLink);
+                const int rank = (n_rb && e_rb ? 0 : 1000) + (is_link ? 100 : 0) + rc;
                 float turn = std::fabs(hn - heading(src[e], u));
                 if (turn > 3.14159265f) turn = 2.0f * 3.14159265f - turn;
                 if (rank < best_rank || (rank == best_rank && turn < best_turn)) {
@@ -94,6 +101,9 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
             }
             major_in_[n] = best;
         }
+        major_at_node_.assign(E, 0);
+        for (uint32_t n = 0; n < E; ++n)
+            if (major_in_[n] != kInvalidEdge) major_at_node_[major_in_[n]] = 1;
     }
 
     if (cfg_.movement_storage) {
@@ -151,7 +161,7 @@ bool LtmTrafficModel::has_capacity_path(EdgeId e, std::span<const EdgeId> after)
 
 bool LtmTrafficModel::has_capacity_departure_path(EdgeId e, std::span<const EdgeId> after) const {
     if (!has_capacity_path(e, after)) return false;
-    if (major_in_.empty() || e >= graph_.num_edges()) return true;
+    if (cfg_.priority_reserve_veh <= 0.0f || major_in_.empty() || e >= graph_.num_edges()) return true;
     const Cell& c = cells_[e];
     return c.storage_veh - static_cast<float>(c.occupancy) > cfg_.priority_reserve_veh;
 }
@@ -280,6 +290,11 @@ bool LtmTrafficModel::has_capacity(EdgeId e) const {
     return c.storage_veh - static_cast<float>(c.occupancy) > 0.0f;
 }
 
+bool LtmTrafficModel::is_major_at_node(EdgeId e) const {
+    if (major_at_node_.empty() || e >= major_at_node_.size()) return true;
+    return major_at_node_[e] != 0;
+}
+
 bool LtmTrafficModel::is_major(EdgeId e, EdgeId next) const {
     if (major_in_.empty() || next >= major_in_.size()) return true;
     return major_in_[next] == e;
@@ -287,7 +302,7 @@ bool LtmTrafficModel::is_major(EdgeId e, EdgeId next) const {
 
 bool LtmTrafficModel::has_capacity_departure(EdgeId e, EdgeId next, EdgeId next_after) const {
     if (!has_capacity_for(e, next, next_after)) return false;
-    if (major_in_.empty() || e >= graph_.num_edges()) return true;
+    if (cfg_.priority_reserve_veh <= 0.0f || major_in_.empty() || e >= graph_.num_edges()) return true;
     const Cell& c = cells_[e];
     return c.storage_veh - static_cast<float>(c.occupancy) > cfg_.priority_reserve_veh;
 }
@@ -327,7 +342,7 @@ bool LtmTrafficModel::on_exit_gate(EdgeId e, EdgeId next, bool room, AgentId a, 
     // the current link's own travel time. Always active, not opt-in.
     bool spillback_blocked = !room;
     // Node priority: a minor approach keeps a free-storage reserve on `next`.
-    if (!spillback_blocked && !major_in_.empty() && next != kInvalidEdge &&
+    if (!spillback_blocked && cfg_.priority_reserve_veh > 0.0f && !major_in_.empty() && next != kInvalidEdge &&
         next < graph_.num_edges() && major_in_[next] != e) {
         const Cell& r = cells_[next];
         if (r.storage_veh - static_cast<float>(r.occupancy) <= cfg_.priority_reserve_veh)
