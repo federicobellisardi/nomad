@@ -83,6 +83,7 @@ struct TrafficConfig {
     float ltm_priority_reserve_veh = 0.0f;  // see LtmTrafficModel::Config::priority_reserve_veh
     bool  ltm_priority_service     = false; // see LtmTrafficModel::Config::priority_service
     float ltm_priority_cycle_max_m = 0.0f;  // see LtmTrafficModel::Config::priority_cycle_max_m
+    bool  ltm_minor_squeeze_stuck_receiver = false; // see LtmTrafficModel::Config::minor_squeeze_stuck_receiver
 };
 
 struct DemandConfig {

@@ -109,6 +109,7 @@ static int run_scenario(ScenarioConfig cfg) {
         ltm_cfg.priority_reserve_veh = cfg.traffic.ltm_priority_reserve_veh;
         ltm_cfg.priority_service     = cfg.traffic.ltm_priority_service;
         ltm_cfg.priority_cycle_max_m = cfg.traffic.ltm_priority_cycle_max_m;
+        ltm_cfg.minor_squeeze_stuck_receiver = cfg.traffic.ltm_minor_squeeze_stuck_receiver;
         auto ltm = std::make_unique<LtmTrafficModel>(*graph, ltm_cfg);
         ltm_model = ltm.get();
         if (ltm_cfg.priority_cycle_max_m > 0.0f)

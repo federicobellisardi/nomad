@@ -158,6 +158,15 @@ public:
         // where the straightest-continuation rule would give way to the
         // entries instead.
         float priority_cycle_max_m = 0.0f;
+        // Minor approaches are squeezed only into stuck receivers (opt-in,
+        // needs a priority rule and stuck_time_s > 0). The stuck-time squeeze
+        // lets a minor approach (major_in_[next] != e) through a spillback
+        // block only if `next` itself has had no exit for stuck_time_s (true
+        // deadlock). Waiting at a give-way while the receiver still drains is
+        // normal; squeezing it pushed entries into full rings anyway (Palma:
+        // tertiary links at 18-37x storage at a flagged ring near the Ma-19).
+        // Major approaches keep the plain squeeze.
+        bool  minor_squeeze_stuck_receiver = false;
     };
 
     explicit LtmTrafficModel(const Graph& graph);

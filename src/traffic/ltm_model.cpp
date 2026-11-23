@@ -422,7 +422,9 @@ bool LtmTrafficModel::on_exit_gate(EdgeId e, EdgeId next, bool room, AgentId a, 
         (!cfg_.squeeze_per_receiver ||
          t - cells_[next].last_squeeze_in >= cfg_.stuck_time_s) &&
         (!cfg_.squeeze_stuck_receiver || next >= graph_.num_edges() ||
-         t - cells_[next].last_exit >= cfg_.stuck_time_s)) {
+         t - cells_[next].last_exit >= cfg_.stuck_time_s) &&
+        (!cfg_.minor_squeeze_stuck_receiver || major_in_.empty() || next >= graph_.num_edges() ||
+         major_in_[next] == e || t - cells_[next].last_exit >= cfg_.stuck_time_s)) {
         spillback_blocked = false;
         ++n_squeezed_;
         cells_[next].last_squeeze_in = t;

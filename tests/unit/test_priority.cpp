@@ -231,3 +231,44 @@ TEST_CASE("Priority: one-way residential blocks are not roundabouts", "[traffic]
     auto m = make_cycle(g, 500.0f);
     REQUIRE(m.circulating_links() == 0);
 }
+
+// ── Squeeze of minor approaches only into stuck receivers ───────────────────
+namespace {
+LtmTrafficModel make_minor_squeeze(const Graph& g, bool stuck_only) {
+    LtmTrafficModel::Config c;
+    c.priority_service = true;
+    c.stuck_time_s = 30.0f;
+    c.minor_squeeze_stuck_receiver = stuck_only;
+    return LtmTrafficModel(g, c);
+}
+// Receiver e2 full (7 >= 6.67); approach `from` blocked from t=10; e2 drains
+// one vehicle at t=35 and is refilled. Returns admissions at t=41 and t=66.
+std::pair<bool, bool> squeeze_case(bool stuck_only, EdgeId from) {
+    Graph g = make_ramp_merge();
+    auto m = make_minor_squeeze(g, stuck_only);
+    m.on_enter(from, 1, 0.0);
+    fill_receiver(m, 7);
+    REQUIRE_FALSE(m.on_exit_to(from, 2, 3, 1, 10.0));       // block starts
+    REQUIRE(m.on_exit_to(2, 3, kInvalidEdge, 100, 35.0));   // receiver still drains
+    m.on_enter(2, 300, 35.0);                                // and is full again
+    const bool at41 = m.on_exit_to(from, 2, 3, 1, 41.0);
+    const bool at66 = at41 ? true : m.on_exit_to(from, 2, 3, 1, 66.0);
+    return {at41, at66};
+}
+} // namespace
+
+TEST_CASE("Minor squeeze: without the rule a waiting minor entry is squeezed after stuck_time", "[traffic][priority][squeeze]") {
+    auto [at41, at66] = squeeze_case(false, 1);
+    REQUIRE(at41);
+}
+
+TEST_CASE("Minor squeeze: a minor entry is not squeezed into a receiver that still drains", "[traffic][priority][squeeze]") {
+    auto [at41, at66] = squeeze_case(true, 1);
+    REQUIRE_FALSE(at41);   // receiver exited at 35: give-way wait, not gridlock
+    REQUIRE(at66);         // no exit for 31 s: true deadlock, squeeze allowed
+}
+
+TEST_CASE("Minor squeeze: major approaches keep the plain stuck-time squeeze", "[traffic][priority][squeeze]") {
+    auto [at41, at66] = squeeze_case(true, 0);
+    REQUIRE(at41);
+}
