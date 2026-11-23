@@ -152,3 +152,82 @@ TEST_CASE("Priority service: off by default", "[traffic][priority][service]") {
     REQUIRE_FALSE(m.priority_service());
     REQUIRE(m.is_major_at_node(1));     // every approach counts as major when off
 }
+
+// ── Unmapped roundabouts: short one-way cycles (priority_cycle_max_m) ───────
+namespace {
+// Square one-way ring 0->1->2->3->0 (sides 50 m, primary), plus a straight
+// two-way-free approach 4->1 (primary, 200 m) entering the ring at node 1
+// in line with ring link 1->2 (the entry is the straightest continuation).
+//   coordinates: 0 (0,0) 1 (0.0006,0) 2 (0.0006,0.00045) 3 (0,0.00045) 4 (0.0006,-0.0018)
+Graph make_ring(float side = 50.0f) {
+    Graph g;
+    g.nodes.resize(5);
+    const float xy[5][2] = {{0.0f, 0.0f}, {0.0006f, 0.0f}, {0.0006f, 0.00045f}, {0.0f, 0.00045f}, {0.0006f, -0.0018f}};
+    for (int i = 0; i < 5; ++i) g.nodes[i] = {xy[i][0], xy[i][1], 0, 0, 0, static_cast<uint32_t>(i)};
+    // out-edges: node0: e0 (0->1); node1: e1 (1->2); node2: e2 (2->3); node3: e3 (3->0); node4: e4 (4->1)
+    g.row_ptr = {0, 1, 2, 3, 4, 5};
+    g.col_idx = {0, 1, 2, 3, 4};
+    auto mk = [](NodeId t, float len) {
+        EdgeData d{};
+        d.target = t; d.length_m = len; d.free_flow_speed = 10.0f; d.capacity = 1600.0f;
+        d.road_class = static_cast<uint8_t>(RoadClass::Primary);
+        return d;
+    };
+    g.edges = {mk(1, side), mk(2, side), mk(3, side), mk(0, side), mk(1, 200.0f)};
+    g.geom_ptr.assign(6, 0);
+    return g;
+}
+LtmTrafficModel make_cycle(const Graph& g, float max_m) {
+    LtmTrafficModel::Config c;
+    c.priority_service = true;
+    c.priority_cycle_max_m = max_m;
+    return LtmTrafficModel(g, c);
+}
+} // namespace
+
+TEST_CASE("Priority: without cycle detection the straight entry wins on a one-way ring", "[traffic][priority][cycle]") {
+    Graph g = make_ring();
+    auto m = make_cycle(g, 0.0f);
+    REQUIRE(m.is_major(4, 1));
+    REQUIRE_FALSE(m.is_major(0, 1));
+    REQUIRE(m.circulating_links() == 0);
+}
+
+TEST_CASE("Priority: a short one-way cycle is treated as a roundabout (circulating link major)", "[traffic][priority][cycle]") {
+    Graph g = make_ring();
+    auto m = make_cycle(g, 500.0f);
+    REQUIRE(m.circulating_links() == 4);
+    REQUIRE(m.is_major(0, 1));          // circulating
+    REQUIRE_FALSE(m.is_major(4, 1));    // entry yields
+}
+
+TEST_CASE("Priority: cycles longer than the threshold are not roundabouts", "[traffic][priority][cycle]") {
+    Graph g = make_ring(200.0f);        // perimeter 800 m
+    auto m = make_cycle(g, 500.0f);
+    REQUIRE(m.circulating_links() == 0);
+    REQUIRE(m.is_major(4, 1));
+}
+
+TEST_CASE("Priority: a cycle through a signalised node is not a roundabout", "[traffic][priority][cycle]") {
+    Graph g = make_ring();
+    g.nodes[2].intersection_type = static_cast<uint8_t>(IntersectionType::TrafficSignal);
+    auto m = make_cycle(g, 500.0f);
+    REQUIRE(m.circulating_links() == 0);
+}
+
+TEST_CASE("Priority: two-way road pairs are not cycles", "[traffic][priority][cycle]") {
+    Graph g = make_merge();             // add the reverse of e2 (3->1): e2 becomes two-way
+    g.row_ptr = {0, 1, 2, 3, 5, 5};
+    g.col_idx = {0, 2, 1, 3, 4};
+    EdgeData r = g.edges[2]; r.target = 1; g.edges.push_back(r);
+    g.geom_ptr.assign(6, 0);
+    auto m = make_cycle(g, 500.0f);
+    REQUIRE(m.circulating_links() == 0);
+}
+
+TEST_CASE("Priority: one-way residential blocks are not roundabouts", "[traffic][priority][cycle]") {
+    Graph g = make_ring();
+    for (int i = 0; i < 4; ++i) g.edges[i].road_class = static_cast<uint8_t>(RoadClass::Residential);
+    auto m = make_cycle(g, 500.0f);
+    REQUIRE(m.circulating_links() == 0);
+}

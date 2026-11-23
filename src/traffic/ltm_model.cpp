@@ -1,6 +1,8 @@
 #include <nomad/traffic/ltm_model.hpp>
 
 #include <algorithm>
+#include <limits>
+#include <queue>
 #include <cassert>
 #include <cmath>
 
@@ -70,12 +72,70 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
             const float dy = graph.nodes[b].lat - graph.nodes[a].lat;
             return std::atan2(dy, dx);
         };
+        // Short one-way cycles = unmapped roundabouts (priority_cycle_max_m).
+        auto car_ok = [&](EdgeId x) {
+            return edge_accessible(graph.edges[x].road_class, graph.edges[x].flags, AgentMode::Car);
+        };
+        std::vector<uint8_t> oneway(E, 0), circ(E, 0);
+        for (uint32_t x = 0; x < E; ++x) {
+            if (!car_ok(x) || src[x] == kInvalidNode || graph.edges[x].target >= N) continue;
+            // major roads only: one-way residential / service / unclassified
+            // blocks are street grids, not roundabouts
+            if (graph.edges[x].road_class > static_cast<uint8_t>(RoadClass::TertiaryLink)) continue;
+            bool twin = false;
+            for (EdgeId y : graph.out_edges(graph.edges[x].target))
+                if (graph.edges[y].target == src[x] && car_ok(y)) { twin = true; break; }
+            oneway[x] = !twin;
+        }
+        if (cfg_.priority_cycle_max_m > 0.0f) {
+            const float L = cfg_.priority_cycle_max_m;
+            const auto signal = static_cast<uint8_t>(IntersectionType::TrafficSignal);
+            std::vector<float>  dist(N, std::numeric_limits<float>::infinity());
+            std::vector<EdgeId> pred(N, kInvalidEdge);
+            std::vector<NodeId> touched;
+            using QE = std::pair<float, NodeId>;
+            for (uint32_t x = 0; x < E; ++x) {
+                if (!oneway[x] || circ[x]) continue;
+                const NodeId u = src[x], v = graph.edges[x].target;
+                if (graph.nodes[u].intersection_type == signal || graph.nodes[v].intersection_type == signal) continue;
+                const float budget = L - graph.edges[x].length_m;
+                if (budget <= 0.0f) continue;
+                // bounded Dijkstra v -> u over one-way, unsignalised car links
+                std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+                dist[v] = 0.0f; touched.push_back(v); pq.push({0.0f, v});
+                bool found = false;
+                while (!pq.empty()) {
+                    auto [d, a] = pq.top(); pq.pop();
+                    if (d > dist[a]) continue;
+                    if (a == u) { found = true; break; }
+                    for (EdgeId y : graph.out_edges(a)) {
+                        if (!oneway[y]) continue;
+                        const NodeId b = graph.edges[y].target;
+                        if (b != u && graph.nodes[b].intersection_type == signal) continue;
+                        const float nd = d + graph.edges[y].length_m;
+                        if (nd > budget || nd >= dist[b]) continue;
+                        if (dist[b] == std::numeric_limits<float>::infinity()) touched.push_back(b);
+                        dist[b] = nd; pred[b] = y; pq.push({nd, b});
+                    }
+                }
+                if (found) {
+                    circ[x] = 1;
+                    for (NodeId a = u; a != v; a = src[pred[a]]) circ[pred[a]] = 1;
+                }
+                for (NodeId a : touched) { dist[a] = std::numeric_limits<float>::infinity(); pred[a] = kInvalidEdge; }
+                touched.clear();
+            }
+            for (uint32_t x = 0; x < E; ++x) n_circ_ += circ[x];
+        }
+        auto circulating = [&](EdgeId x) {
+            return (graph.edges[x].flags & EdgeFlags::Roundabout) || circ[x];
+        };
         major_in_.assign(E, kInvalidEdge);
         for (uint32_t n = 0; n < E; ++n) {
             const NodeId u = src[n];
             if (u == kInvalidNode) continue;
             const NodeId w = graph.edges[n].target;
-            const bool n_rb = graph.edges[n].flags & EdgeFlags::Roundabout;
+            const bool n_rb = circulating(n);
             const float hn = heading(u, w);
             EdgeId best = kInvalidEdge;
             int best_rank = 1 << 30; float best_turn = 10.0f;
@@ -83,7 +143,7 @@ LtmTrafficModel::LtmTrafficModel(const Graph& graph, Config cfg)
                 const EdgeId e = in_idx[k];
                 if (src[e] == w) continue;                   // U-turn of the same segment
                 if (!edge_accessible(graph.edges[e].road_class, graph.edges[e].flags, AgentMode::Car)) continue;
-                const bool e_rb = graph.edges[e].flags & EdgeFlags::Roundabout;
+                const bool e_rb = circulating(e);
                 // rank: circulating roundabout approach first on a roundabout link,
                 // then through roads before *_link connectors (ramps yield), then class
                 const uint8_t rc = graph.edges[e].road_class;

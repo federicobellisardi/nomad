@@ -145,6 +145,19 @@ public:
         // (ramps yield), then the best road class, ties broken by the
         // straightest continuation.
         bool  priority_service = false;
+        // Unmapped roundabouts (opt-in, 0 = off; used by both priority rules).
+        // A one-way link of a major road class (motorway .. tertiary_link; no
+        // car link in the opposite direction between the same nodes) that lies
+        // on a directed cycle of such links of total length
+        // <= priority_cycle_max_m, through no signalised node, counts as
+        // circulating (one-way residential blocks are street grids, not
+        // roundabouts: in Palma they would add ~6,300 links): like a tagged roundabout link it is the
+        // major approach where the cycle continues. OSM often maps
+        // roundabouts and dumbbell interchanges as plain one-way carriageways
+        // joined by U-turn connectors (Palma, Ma-20 / Ma-1110 Son Espases),
+        // where the straightest-continuation rule would give way to the
+        // entries instead.
+        float priority_cycle_max_m = 0.0f;
     };
 
     explicit LtmTrafficModel(const Graph& graph);
@@ -167,6 +180,8 @@ public:
     // True if e is the major approach of at least one out-link of its target
     // node (always true when no priority rule is on).
     bool    is_major_at_node(EdgeId e) const override;
+    // Number of links flagged as circulating by the short-cycle rule.
+    std::size_t circulating_links() const { return n_circ_; }
     bool    has_capacity_for(EdgeId e, EdgeId next,
                              EdgeId next_after = kInvalidEdge) const      override;
     bool    on_exit_to  (EdgeId e, EdgeId next, EdgeId next_after,
@@ -237,6 +252,7 @@ private:
     void     release_movement(AgentId a);
     std::vector<EdgeId>   major_in_;   // major approach of each link (priority rule)
     std::vector<uint8_t>  major_at_node_;   // e is major for some out-link of target(e)
+    std::size_t           n_circ_{0};       // links on short one-way cycles
     std::vector<float>    lanes_;
     std::vector<uint32_t> mv_off_;
     std::vector<int32_t>  mv_occ_;
