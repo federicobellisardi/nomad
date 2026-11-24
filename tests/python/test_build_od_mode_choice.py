@@ -203,3 +203,38 @@ class TestStreamViajesKmTracking:
         row = out.iloc[0]
         assert row["viajes"] == pytest.approx((10.0 + 20.0) / 2)
         assert row["viajes_km"] == pytest.approx((40.0 + 100.0) / 2)
+
+
+class TestStreamViajesDayMean:
+    """A key absent from one of the day-type files is a day with zero trips:
+    the mean divides by the number of files, not by the days the key appears."""
+
+    def _files(self, tmp_path):
+        f1 = tmp_path / "20220207_viajes.csv.gz"
+        f2 = tmp_path / "20220214_viajes.csv.gz"
+        pd.DataFrame([{"origen": "1", "destino": "2", "periodo": 8, "distancia": "2-10", "viajes": 10.0, "viajes_km": 40.0},
+                      {"origen": "1", "destino": "3", "periodo": 9, "distancia": "10-50", "viajes": 6.0, "viajes_km": 120.0}]
+                     ).to_csv(f1, sep="|", index=False, compression="gzip")
+        pd.DataFrame([{"origen": "1", "destino": "2", "periodo": 8, "distancia": "2-10", "viajes": 20.0, "viajes_km": 100.0}]
+                     ).to_csv(f2, sep="|", index=False, compression="gzip")
+        cols = {"orig": "origen", "dest": "destino", "period": "periodo",
+                "trips": "viajes", "mode": None, "distance": "distancia", "km": "viajes_km"}
+        return [f1, f2], cols
+
+    def test_key_missing_on_a_day_counts_as_zero(self, tmp_path):
+        files, cols = self._files(tmp_path)
+        out = stream_viajes(files, cols, fua_zone_ids={"1", "2", "3"}, weekend=False, holidays_set=set())
+        sparse = out[out["destino"] == "3"].iloc[0]
+        assert sparse["viajes"] == pytest.approx(6.0 / 2)
+        assert sparse["viajes_km"] == pytest.approx(120.0 / 2)
+        # the per-trip distance used by mode choice is unchanged
+        assert sparse["viajes_km"] / sparse["viajes"] == pytest.approx(20.0)
+        dense = out[out["destino"] == "2"].iloc[0]
+        assert dense["viajes"] == pytest.approx(15.0)
+        assert out["viajes"].sum() == pytest.approx((10.0 + 6.0 + 20.0) / 2)
+
+    def test_legacy_mean_divides_by_days_seen(self, tmp_path):
+        files, cols = self._files(tmp_path)
+        out = stream_viajes(files, cols, fua_zone_ids={"1", "2", "3"}, weekend=False, holidays_set=set(),
+                            legacy_days_seen_mean=True)
+        assert out[out["destino"] == "3"].iloc[0]["viajes"] == pytest.approx(6.0)

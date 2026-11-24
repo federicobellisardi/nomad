@@ -144,8 +144,17 @@ DISTANCE_MODE_FRACTIONS: dict[str, dict[str, float]] = {
 def stream_viajes(viajes_files: list, cols: dict,
                   fua_zone_ids: set, weekend: bool,
                   holidays_set: set,
-                  only_date: "dt.date | None" = None) -> "pd.DataFrame | None":
+                  only_date: "dt.date | None" = None,
+                  legacy_days_seen_mean: bool = False) -> "pd.DataFrame | None":
     """Stream viajes files for one day-type and return the mean OD.
+
+    The mean of each key is its trip sum divided by the number of files of the
+    day type. A key absent from a file is a day with zero trips for that cell.
+    legacy_days_seen_mean=True restores the old behaviour (divide by the number
+    of files in which the key appears). That inflates sparse cells: +4.7% on
+    Palma's internal person trips and +56% on its exchange with the rest of
+    Mallorca, Feb 2022 weekdays. Keep it only to reproduce ODs built before
+    the fix.
 
     If only_date is given, the day-type filter is bypassed and only that
     calendar day's file is used -- the "mean" is then that single day's
@@ -235,7 +244,8 @@ def stream_viajes(viajes_files: list, cols: dict,
     for key, vals in zip(keys, acc.values()):
         for col, val in zip(group_cols, key):
             rows[col].append(val)
-        s, c = vals[0], vals[1]
+        s = vals[0]
+        c = vals[1] if legacy_days_seen_mean else n_used
         rows[COL_TRIPS].append(s / c)
         if COL_KM:
             rows[COL_KM].append(vals[2] / c)
@@ -592,6 +602,10 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
     parser.add_argument("--label-suffix", default="",
                         help="Suffisso aggiunto all'etichetta dei file di uscita "
                              "(od_{slug}_{label}{suffix}.csv), es. '_bv_s43' per una replica.")
+    parser.add_argument("--legacy-day-mean", action="store_true",
+                        help="Media di ogni cella OD sui soli giorni in cui la cella compare (comportamento "
+                             "precedente, gonfia le celle rare). Solo per riprodurre OD costruite prima della "
+                             "correzione; default: media su tutti i file del tipo di giorno.")
     parser.add_argument("--cells-only", action="store_true",
                         help="Non riscrive od_{slug}_{label}.csv: rigenera le stesse righe e scrive solo "
                              "od_{slug}_{label}_cells.parquet (per ogni riga OD, la cella MITMA di "
@@ -754,7 +768,8 @@ def main(argv=None, mode_choice_fn=None, transit_frac_override=None) -> None:
 
         print(f"\n[{label}] Caricamento viajes ({n_files} file) …")
         od_fua = stream_viajes(viajes_files, cols, fua_zone_ids, weekend, holidays_set,
-                               only_date=only_date)
+                               only_date=only_date,
+                               legacy_days_seen_mean=args.legacy_day_mean)
         if od_fua is None:
             print(f"  nessun dato — salto")
             continue
