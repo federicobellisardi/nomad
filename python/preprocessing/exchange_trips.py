@@ -121,6 +121,16 @@ def main(argv=None):
     O, D = od[cols['orig']].astype(str), od[cols['dest']].astype(str)
     inb = O.isin(rest_ids) & D.isin(fz_ids); outb = O.isin(fz_ids) & D.isin(rest_ids)
     ex = od[inb | outb].copy()
+    # pairs without a gateway: FUA zones with no car-SCC node in the simulation graph
+    # (boundary_gateways has no target for them); their trips are dropped and reported
+    pairs = set(zip(gw.out_zone, gw.fua_zone))
+    eo, edd = ex[cols['orig']].astype(str), ex[cols['dest']].astype(str)
+    has = [((o, d) if o in rest_ids else (d, o)) in pairs for o, d in zip(eo, edd)]
+    has = np.array(has, bool)
+    if (~has).any():
+        print(f'dropped (no gateway for the pair): {(~has).sum():,} MITMA rows, '
+              f'{ex.loc[~has, cols["trips"]].sum():,.0f} person trips/day')
+    ex = ex[has]
     print(f'exchange MITMA rows {len(ex):,}, person trips/day {ex[cols["trips"]].sum():,.0f} '
           f'(inbound {od[inb][cols["trips"]].sum():,.0f}, outbound {od[outb][cols["trips"]].sum():,.0f})')
 
