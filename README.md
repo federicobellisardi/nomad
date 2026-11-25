@@ -155,7 +155,63 @@ requires re-running step 3 *then* step 4, in that order** — skipping this
 either segfaults (`CHRouter::ch_query` on an out-of-range node) or silently
 routes trips to the wrong place. There is no automatic invalidation.
 
-### Validation — Palma de Mallorca case study
+### Palma day-to-day baseline (November 2026)
+
+The current Palma setup is a February 2022 weekday, car only, LTM traffic
+model, run as a day-to-day assignment chain. Its inputs and launch scripts live
+in a separate research workspace; what follows lists the engine and builder
+pieces it relies on.
+
+**Demand**
+- `build_od.py` with `--node-weights <parquet>`: trip ends are drawn inside
+  each MITMA zone in proportion to a node weight (building volume) instead of
+  uniformly.
+- The day mean averages each OD cell over all day-type files, including the
+  days the cell is absent (fixed in the builder; `--legacy-day-mean` restores
+  the old behaviour, which inflated sparse cells).
+- Trips between the FUA and the rest of the island enter or leave through
+  fixed boundary gateway nodes. This is a workspace script, not part of this
+  repository.
+
+**Node model (LTM)**: three rules, all off by default:
+
+```json
+"traffic": { "ltm_priority_service": true,
+             "ltm_priority_cycle_max_m": 500,
+             "ltm_minor_squeeze_stuck_receiver": true }
+```
+
+- Priority-ordered node service: give-way at merges, `*_link` approaches
+  yield to through roads.
+- Short one-way major-road cycles (unmapped roundabouts) count as circulating.
+- Minor approaches are squeezed only into stuck receivers.
+
+Without these rules the full-demand Palma runs gridlock.
+
+**Day-to-day chain**
+- it0 routes from free flow.
+- Each later iteration reads the previous one's `routes.bin` and
+  `td_costs.bin`:
+  ```json
+  "routing": { "routes_in": "…/routes.bin", "td_costs_in": "…/td_costs.bin",
+               "replan_rule": "gap", "replan_gap_alpha": 1.0,
+               "replan_gap_band": 0.05, "replan_fraction": 1.0 },
+  "output":  { "routes_out": "…", "td_costs_out": "…", "td_smoothing": 0.5 },
+  "demand":  { "nested_sampling": true }
+  ```
+- With nested sampling, the two departure columns of the OD CSV are a uniform
+  window `[start, end]` in seconds.
+- `nomad_cli` uses `osm_tag_config` only when it has to rebuild the graph:
+  with an existing `graph_bin` it is ignored.
+
+**Status after 9 iterations**
+- 1.02M cars, no gridlock.
+- Relative gap 0.018.
+- Median sim/IMD 0.79 over 16 Consell de Mallorca IMD 2022 count sections.
+- Caveat: IMD is an annual all-vehicle average, so this is a coarse check, not
+  a validation. Hourly profiles and travel times are not validated.
+
+### Validation — Palma de Mallorca case study (2026-10, before LTM day-to-day work)
 
 Palma's FUA (79,039 nodes / 186,242 edges after simplification) was used to
 validate the full pipeline against real 2022 MITMA weekday demand:
