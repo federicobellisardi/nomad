@@ -7,7 +7,11 @@ zone) pair this script:
   1. computes the fastest path on a region-wide OSM car network (class-default
      free-flow speeds, maxspeed when numeric) from the outside zone to the FUA zone;
   2. takes as gateway the first path node inside the FUA polygon, and as outside
-     leg the free-flow time from the outside zone to the gateway;
+     leg the free-flow time from the outside zone to the gateway. If that crossing
+     cannot be snapped (step 3) because the path only cuts a thin sliver of the
+     FUA polygon where the simulation graph has no matching road, the next entry
+     of the path into the FUA is tried, and so on (--entry first-snapped, the
+     default; --entry first keeps the first crossing and reports a failure);
   3. snaps the gateway to the simulation graph (nodes.parquet / edges.parquet,
      same ids as graph.bin):
        entry node = from-node of a car edge pointing inward (bearing within 60 deg
@@ -120,6 +124,8 @@ def main(argv=None):
     ap.add_argument('--out', required=True)
     ap.add_argument('--metric-crs', default='auto', help="projected CRS for zone representative points "
                     "(EPSG code, or 'auto' = local UTM)")
+    ap.add_argument('--entry', choices=['first', 'first-snapped'], default='first-snapped',
+                    help='gateway = first FUA entry of the path, or the first entry that snaps')
     ap.add_argument('--zone-prefixes', nargs='*', default=None,
                     help='keep only outside zones whose id starts with one of these prefixes')
     ap.add_argument('--same-class-radius', type=float, default=2000.0,
@@ -217,17 +223,24 @@ def main(argv=None):
             while path[-1] != s:
                 path.append(pred[path[-1]])
             path = path[::-1]
-            k = next(i for i, p in enumerate(path) if inside[p])
-            g, gp = path[k], path[k - 1]
-            cls = ecls[(gp, g)]
-            dirx = (lon[g] - lon[gp]) * math.cos(math.radians(lat[g])); diry = lat[g] - lat[gp]
-            if (gp, g) not in snapped:     # many pairs share a crossing; snapping is deterministic
-                snapped[(gp, g)] = (snap(lon[g], lat[g], dirx, diry, cls, True), snap(lon[g], lat[g], dirx, diry, cls, False))
-            (en, en_d, en_c, en_fb, en_w), (ex, ex_d, ex_c, ex_fb, ex_w) = snapped[(gp, g)]
+            entries = [i for i in range(1, len(path)) if inside[path[i]] and not inside[path[i - 1]]]
+            if a.entry == 'first':
+                entries = entries[:1]
+            for k in entries:
+                g, gp = path[k], path[k - 1]
+                cls = ecls[(gp, g)]
+                dirx = (lon[g] - lon[gp]) * math.cos(math.radians(lat[g])); diry = lat[g] - lat[gp]
+                if (gp, g) not in snapped:     # many pairs share a crossing; snapping is deterministic
+                    snapped[(gp, g)] = (snap(lon[g], lat[g], dirx, diry, cls, True), snap(lon[g], lat[g], dirx, diry, cls, False))
+                (en, en_d, en_c, en_fb, en_w), (ex, ex_d, ex_c, ex_fb, ex_w) = snapped[(gp, g)]
+                if en is not None and ex is not None:
+                    break
+            n_entry = entries.index(k) + 1
             rows.append(dict(out_zone=oz, fua_zone=fzid, ok=en is not None and ex is not None,
                              gw_lon=lon[g], gw_lat=lat[g], gw_class=cls, outside_s=dist[g], total_s=dist[t],
                              entry_node=en, entry_snap_m=en_d, entry_walk_m=en_w, entry_class=en_c, entry_fallback=en_fb,
-                             exit_node=ex, exit_snap_m=ex_d, exit_walk_m=ex_w, exit_class=ex_c, exit_fallback=ex_fb))
+                             exit_node=ex, exit_snap_m=ex_d, exit_walk_m=ex_w, exit_class=ex_c, exit_fallback=ex_fb,
+                             **({} if a.entry == 'first' else {'entry_index': n_entry})))
     gw = pd.DataFrame(rows)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     gw.to_csv(a.out, index=False)
