@@ -54,20 +54,23 @@ def _md5(p):
 
 
 def gateway_offsets(rows, gw, day_end):
-    """Shift inbound windows (orig_zone 'XO|out|fua') by outside_s and clip their end
-    at day_end. Returns (rows, number of clipped rows, clipped vehicles)."""
+    """Shift inbound windows (orig_zone 'XO|out|fua') by outside_s, drop rows whose
+    shifted window starts at or after day_end (they reach the FUA the next day) and
+    clip the remaining window ends at day_end.
+    Returns (rows, clipped rows, clipped vehicles, offsets, dropped rows, dropped vehicles)."""
     g = gw.set_index(['out_zone', 'fua_zone'])
     inbound = rows.orig_zone.str.startswith('XO|')
     key = rows.loc[inbound, 'orig_zone'].str.split('|')
     off = np.array([g.loc[(k[1], k[2]), 'outside_s'] for k in key])
     rows.loc[inbound, 'depart_mean_s'] += off
     rows.loc[inbound, 'depart_std_s'] += off
-    if (rows.depart_mean_s >= day_end).any():
-        raise ValueError('a shifted departure window starts after the end of the day')
+    gone = rows.depart_mean_s >= day_end
+    n_gone, v_gone = int(gone.sum()), int(rows.loc[gone, 'count'].sum())
+    rows = rows[~gone].copy()
     late = rows.depart_std_s > day_end
     n_late, v_late = int(late.sum()), int(rows.loc[late, 'count'].sum())
     rows.loc[late, 'depart_std_s'] = day_end
-    return rows, n_late, v_late, off
+    return rows, n_late, v_late, off, n_gone, v_gone
 
 
 def main(argv=None):
@@ -159,8 +162,9 @@ def main(argv=None):
                            occupancy_factor=a.occupancy_factor, mode_choice_fn=mode_choice_fn,
                            transit_frac_override=transit, with_cells=True, node_weight=node_weight)
     rows = rows[rows['mode'] == 'car'].copy()
-    rows, n_late, v_late, off = gateway_offsets(rows, gw, a.day_end)
+    rows, n_late, v_late, off, n_gone, v_gone = gateway_offsets(rows, gw, a.day_end)
     inbound = rows.orig_zone.str.startswith('XO|')
+    print(f'inbound rows reaching the FUA after {a.day_end:.0f} s, dropped: {n_gone} rows, {v_gone} cars')
     print(f'inbound windows clipped at {a.day_end:.0f} s: {n_late} rows, {v_late} cars')
     print(f'exchange car vehicles/day {rows["count"].sum():,} (inbound {rows.loc[inbound, "count"].sum():,}, '
           f'outbound {rows.loc[~inbound, "count"].sum():,}); inbound offset min p50 {np.median(off) / 60:.1f} '
@@ -186,7 +190,7 @@ def main(argv=None):
                nomad_walk_commit=subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'],
                                                 capture_output=True, text=True).stdout.strip(),
                base_car_agents=base_car, exchange_car_agents=ex_car, total_car_agents=base_car + ex_car,
-               clipped_rows=n_late, clipped_cars=v_late, day_end_s=a.day_end, md5=_md5(a.out_combined))
+               clipped_rows=n_late, clipped_cars=v_late, dropped_next_day_rows=n_gone, dropped_next_day_cars=v_gone, day_end_s=a.day_end, md5=_md5(a.out_combined))
     json.dump(man, open(str(a.out_combined) + '.manifest.json', 'w'), indent=1)
     print(f'base car {base_car:,} + exchange {ex_car:,} = {base_car + ex_car:,} -> {a.out_combined}')
 
