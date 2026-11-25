@@ -19,7 +19,9 @@ zone) pair this script:
      graph border often dead-end outside the SCC).
 
 Outside zones are the MITMA zones whose representative point lies in
---region-bbox and that are not FUA zones (same zone rule as build_od).
+--region-bbox, that are not FUA zones (same zone rule as build_od) and, with
+--zone-prefixes, whose id starts with one of the prefixes (e.g. INE province
+codes: 28 for the Comunidad de Madrid, 08 17 25 43 for Catalonia).
 
 Data layout as build_od.py: <data-dir>/fua/boundaries.gpkg, <data-dir>/od_raw/
 (zone .gpkg/.shp), <data-dir>/<city slug>/nodes.parquet and edges.parquet.
@@ -118,6 +120,8 @@ def main(argv=None):
     ap.add_argument('--out', required=True)
     ap.add_argument('--metric-crs', default='auto', help="projected CRS for zone representative points "
                     "(EPSG code, or 'auto' = local UTM)")
+    ap.add_argument('--zone-prefixes', nargs='*', default=None,
+                    help='keep only outside zones whose id starts with one of these prefixes')
     ap.add_argument('--same-class-radius', type=float, default=2000.0,
                     help='search radius (m) for an edge of the crossing road class')
     a = ap.parse_args(argv)
@@ -136,6 +140,8 @@ def main(argv=None):
     allz['lon'], allz['lat'] = rp.x, rp.y
     x0, y0, x1, y1 = a.region_bbox
     rest = allz[(allz.lon > x0) & (allz.lon < x1) & (allz.lat > y0) & (allz.lat < y1) & ~allz.id.isin(fz_ids)]
+    if a.zone_prefixes:
+        rest = rest[rest.id.str.startswith(tuple(a.zone_prefixes))]
     print(f'FUA zones {len(fz_ids)}, outside zones in the region {len(rest)}')
 
     nd = pd.read_parquet(data / slug / 'nodes.parquet')
@@ -199,7 +205,7 @@ def main(argv=None):
     src = {z: nearest_region_node(x, y) for z, x, y in zip(rest.id, rest.lon, rest.lat)}
     tgt = {z: nearest_region_node(r.lon, r.lat) for z, r in ftarget.iterrows()}
     inside = np.array([P.contains(Point(x, y)) for x, y in zip(lon, lat)])
-    rows = []
+    rows, snapped = [], {}
     for oz, s in src.items():
         if inside[s]:
             print(f'  WARN outside zone {oz} snaps inside the FUA'); continue
@@ -215,8 +221,9 @@ def main(argv=None):
             g, gp = path[k], path[k - 1]
             cls = ecls[(gp, g)]
             dirx = (lon[g] - lon[gp]) * math.cos(math.radians(lat[g])); diry = lat[g] - lat[gp]
-            en, en_d, en_c, en_fb, en_w = snap(lon[g], lat[g], dirx, diry, cls, True)
-            ex, ex_d, ex_c, ex_fb, ex_w = snap(lon[g], lat[g], dirx, diry, cls, False)
+            if (gp, g) not in snapped:     # many pairs share a crossing; snapping is deterministic
+                snapped[(gp, g)] = (snap(lon[g], lat[g], dirx, diry, cls, True), snap(lon[g], lat[g], dirx, diry, cls, False))
+            (en, en_d, en_c, en_fb, en_w), (ex, ex_d, ex_c, ex_fb, ex_w) = snapped[(gp, g)]
             rows.append(dict(out_zone=oz, fua_zone=fzid, ok=en is not None and ex is not None,
                              gw_lon=lon[g], gw_lat=lat[g], gw_class=cls, outside_s=dist[g], total_s=dist[t],
                              entry_node=en, entry_snap_m=en_d, entry_walk_m=en_w, entry_class=en_c, entry_fallback=en_fb,
