@@ -204,6 +204,12 @@ Without these rules the full-demand Palma runs gridlock.
 - `nomad_cli` uses `osm_tag_config` only when it has to rebuild the graph:
   with an existing `graph_bin` it is ignored.
 
+**Tools**
+- `python/nomad_tools/` (pure Python, no C++ extension): run `python -m nomad_tools.<module> --help` from `python/`.
+  - `launch_chain`: generate and submit a chain from a city preset.
+  - `chain_summary`, `count_compare`, `network_load`, `gridlock_scan`: evaluation.
+- `python/preprocessing/boundary_gateways.py` and `exchange_trips.py`: trips between the FUA and the rest of the region.
+
 **Status after 9 iterations**
 - 1.02M cars, no gridlock.
 - Relative gap 0.018.
